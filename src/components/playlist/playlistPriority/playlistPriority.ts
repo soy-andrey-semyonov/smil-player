@@ -6,15 +6,15 @@ import { isEqual, isNil } from 'lodash';
 import Debug from 'debug';
 import { PlaylistCommon } from '../playlistCommon/playlistCommon';
 import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
-import { FilesManager } from '../../files/filesManager';
 import { CurrentlyPlayingRegion, PlaylistOptions } from '../../../models/playlistModels';
 import { PriorityRule } from '../../../enums/priorityEnums';
 import { IPlaylistPriority } from './IPlaylistPriority';
+import {IFilesManager} from "../../files/IFilesManager";
 
 const debug = Debug('@signageos/smil-player:playlistPriority');
 
 export class PlaylistPriority extends PlaylistCommon implements IPlaylistPriority {
-	constructor(sos: FrontApplet, files: FilesManager, options: PlaylistOptions) {
+	constructor(sos: FrontApplet, files: IFilesManager, options: PlaylistOptions) {
 		super(sos, files, options);
 	}
 

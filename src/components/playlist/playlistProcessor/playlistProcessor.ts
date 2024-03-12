@@ -4,23 +4,22 @@ import isObject = require('lodash/isObject');
 import cloneDeep = require('lodash/cloneDeep');
 import get = require('lodash/get');
 import set = require('lodash/set');
-import { PlaylistCommon } from '../playlistCommon/playlistCommon';
-import { PlaylistTriggers } from '../playlistTriggers/playlistTriggers';
-import { PlaylistPriority } from '../playlistPriority/playlistPriority';
-import { PlayingInfo, PlaylistElement, PlaylistOptions, VideoPreparing } from '../../../models/playlistModels';
-import { IFile, IStorageUnit } from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
+import {PlaylistCommon} from '../playlistCommon/playlistCommon';
+import {PlaylistTriggers} from '../playlistTriggers/playlistTriggers';
+import {PlaylistPriority} from '../playlistPriority/playlistPriority';
+import {PlayingInfo, PlaylistElement, PlaylistOptions, VideoPreparing} from '../../../models/playlistModels';
+import {IFile, IStorageUnit} from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
 import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
-import { FilesManager } from '../../files/filesManager';
-import { SMILFile, SMILFileObject } from '../../../models/filesModels';
-import { HtmlEnum } from '../../../enums/htmlEnums';
-import { FileStructure } from '../../../enums/fileEnums';
+import {SMILFile, SMILFileObject} from '../../../models/filesModels';
+import {HtmlEnum} from '../../../enums/htmlEnums';
+import {FileStructure} from '../../../enums/fileEnums';
 import {
+	SMILImage,
 	SMILIntro,
 	SMILMedia,
-	SMILVideo,
-	SMILImage,
-	SMILWidget,
 	SMILTicker,
+	SMILVideo,
+	SMILWidget,
 	SosHtmlElement,
 	VideoParams,
 } from '../../../models/mediaModels';
@@ -34,19 +33,19 @@ import {
 	removeDigits,
 	sleep,
 } from '../tools/generalTools';
-import { SMILEnums } from '../../../enums/generalEnums';
-import { isConditionalExpExpired } from '../tools/conditionalTools';
+import {SMILEnums} from '../../../enums/generalEnums';
+import {isConditionalExpExpired} from '../tools/conditionalTools';
 import isUrl from 'is-url-superb';
-import { SMILScheduleEnum } from '../../../enums/scheduleEnums';
-import { ExprTag } from '../../../enums/conditionalEnums';
-import { setDefaultAwait, setElementDuration } from '../tools/scheduleTools';
-import { createPriorityObject } from '../tools/priorityTools';
-import { PriorityObject } from '../../../models/priorityModels';
-import { XmlTags } from '../../../enums/xmlEnums';
-import { parseSmilSchedule } from '../tools/wallclockTools';
-import { RegionAttributes, RegionsObject } from '../../../models/xmlJsonModels';
-import { SMILTriggersEnum } from '../../../enums/triggerEnums';
-import { findTriggerToCancel } from '../tools/triggerTools';
+import {SMILScheduleEnum} from '../../../enums/scheduleEnums';
+import {ExprTag} from '../../../enums/conditionalEnums';
+import {setDefaultAwait, setElementDuration} from '../tools/scheduleTools';
+import {createPriorityObject} from '../tools/priorityTools';
+import {PriorityObject} from '../../../models/priorityModels';
+import {XmlTags} from '../../../enums/xmlEnums';
+import {parseSmilSchedule} from '../tools/wallclockTools';
+import {RegionAttributes, RegionsObject} from '../../../models/xmlJsonModels';
+import {SMILTriggersEnum} from '../../../enums/triggerEnums';
+import {findTriggerToCancel} from '../tools/triggerTools';
 import moment from 'moment';
 import {
 	changeZIndex,
@@ -57,14 +56,15 @@ import {
 } from '../tools/htmlTools';
 import Video from '@signageos/front-applet/es6/FrontApplet/Video/Video';
 import Stream from '@signageos/front-applet/es6/FrontApplet/Stream/Stream';
-import { defaults as config } from '../../../../config/parameters';
-import { StreamEnums } from '../../../enums/mediaEnums';
-import { smilEventEmitter, waitForSuccessOrFailEvents } from '../eventEmitter/eventEmitter';
-import { createLocalFilePath, getSmilVersionUrl, isWidgetUrl } from '../../files/tools';
-import { startTickerAnimation } from '../tools/tickerTools';
-import { isEqual } from 'lodash';
+import {defaults as config} from '../../../../config/parameters';
+import {StreamEnums} from '../../../enums/mediaEnums';
+import {smilEventEmitter, waitForSuccessOrFailEvents} from '../eventEmitter/eventEmitter';
+import {createLocalFilePath, getSmilVersionUrl, isWidgetUrl} from '../../files/tools';
+import {startTickerAnimation} from '../tools/tickerTools';
+import {isEqual} from 'lodash';
 import StreamProtocol from '@signageos/front-applet/es6/FrontApplet/Stream/StreamProtocol';
-import { IPlaylistProcessor } from './IPlaylistProcessor';
+import {IPlaylistProcessor} from './IPlaylistProcessor';
+import {IFilesManager} from "../../files/IFilesManager";
 
 export class PlaylistProcessor extends PlaylistCommon implements IPlaylistProcessor {
 	private checkFilesLoop: boolean = true;
@@ -78,7 +78,7 @@ export class PlaylistProcessor extends PlaylistCommon implements IPlaylistProces
 	private playlistVersion: number = 0;
 	private internalStorageUnit: IStorageUnit;
 
-	constructor(sos: FrontApplet, files: FilesManager, options: PlaylistOptions) {
+	constructor(sos: FrontApplet, files: IFilesManager, options: PlaylistOptions) {
 		super(sos, files, options);
 		this.triggers = new PlaylistTriggers(sos, files, options, this.processPlaylist);
 		this.priority = new PlaylistPriority(sos, files, options);

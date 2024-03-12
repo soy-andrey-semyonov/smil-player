@@ -1,25 +1,25 @@
 /* tslint:disable:Unnecessary semicolon missing whitespace */
-import { SMILMedia } from '../../../models/mediaModels';
-import { sleep } from '../tools/generalTools';
-import { FunctionKeys, SMILTriggersEnum } from '../../../enums/triggerEnums';
-import { isNil } from 'lodash';
-import { RegionAttributes } from '../../../models/xmlJsonModels';
-import { SMILFileObject } from '../../../models/filesModels';
-import { findDuration, setElementDuration } from '../tools/scheduleTools';
+import {SMILMedia} from '../../../models/mediaModels';
+import {sleep} from '../tools/generalTools';
+import {FunctionKeys, SMILTriggersEnum} from '../../../enums/triggerEnums';
+import {isNil} from 'lodash';
+import {RegionAttributes} from '../../../models/xmlJsonModels';
+import {SMILFileObject} from '../../../models/filesModels';
+import {findDuration, setElementDuration} from '../tools/scheduleTools';
 import Nexmosphere from '@signageos/front-applet-extension-nexmosphere/es6';
-import { RfidAntennaEvent } from '@signageos/front-applet/es6/Sensors/IRfidAntenna';
-import { addEventOnTriggerWidget } from '../tools/htmlTools';
-import { ParsedSensor, ParsedTriggerCondition, TriggerEndless, TriggerObject } from '../../../models/triggerModels';
-import { getRandomInt } from '../../files/tools';
-import { SMILScheduleEnum } from '../../../enums/scheduleEnums';
+import {RfidAntennaEvent} from '@signageos/front-applet/es6/Sensors/IRfidAntenna';
+import {addEventOnTriggerWidget} from '../tools/htmlTools';
+import {ParsedSensor, ParsedTriggerCondition, TriggerEndless, TriggerObject} from '../../../models/triggerModels';
+import {getRandomInt} from '../../files/tools';
+import {SMILScheduleEnum} from '../../../enums/scheduleEnums';
 import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
-import { FilesManager } from '../../files/filesManager';
-import set = require('lodash/set');
 import Debug from 'debug';
-import { PlaylistCommon } from '../playlistCommon/playlistCommon';
-import { PlaylistOptions } from '../../../models/playlistModels';
-import { BinaryOperatorChar } from '../../../enums/conditionalEnums';
-import { IPlaylistTriggers } from './IPlaylistTriggers';
+import {PlaylistCommon} from '../playlistCommon/playlistCommon';
+import {PlaylistOptions} from '../../../models/playlistModels';
+import {BinaryOperatorChar} from '../../../enums/conditionalEnums';
+import {IPlaylistTriggers} from './IPlaylistTriggers';
+import {IFilesManager} from "../../files/IFilesManager";
+import set = require('lodash/set');
 
 const debug = Debug('@signageos/smil-player:playlistTriggers');
 
@@ -27,7 +27,7 @@ export class PlaylistTriggers extends PlaylistCommon implements IPlaylistTrigger
 	public readonly triggersEndless: TriggerEndless = {};
 	private readonly processPlaylist: Function;
 
-	constructor(sos: FrontApplet, files: FilesManager, options: PlaylistOptions, processPlaylist: Function) {
+	constructor(sos: FrontApplet, files: IFilesManager, options: PlaylistOptions, processPlaylist: Function) {
 		super(sos, files, options);
 		this.processPlaylist = processPlaylist;
 	}

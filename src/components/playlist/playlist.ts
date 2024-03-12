@@ -1,9 +1,9 @@
-import { initSyncObject } from './tools/syncTools';
-import { PlaylistProcessor } from './playlistProcessor/playlistProcessor';
+import {initSyncObject} from './tools/syncTools';
+import {PlaylistProcessor} from './playlistProcessor/playlistProcessor';
 import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
-import { FilesManager } from '../files/filesManager';
-import { PlaylistDataPrepare } from './playlistDataPrepare/playlistDataPrepare';
-import { PlaylistOptions } from '../../models/playlistModels';
+import {PlaylistDataPrepare} from './playlistDataPrepare/playlistDataPrepare';
+import {PlaylistOptions} from '../../models/playlistModels';
+import {IFilesManager} from "../files/IFilesManager";
 
 export class SmilPlayerPlaylist {
 	public readonly processor: PlaylistProcessor;
@@ -16,7 +16,7 @@ export class SmilPlayerPlaylist {
 		synchronization: initSyncObject(),
 	};
 
-	constructor(sos: FrontApplet, files: FilesManager) {
+	constructor(sos: FrontApplet, files: IFilesManager) {
 		this.processor = new PlaylistProcessor(sos, files, this.options);
 		this.dataPrepare = new PlaylistDataPrepare(sos, files, this.options);
 	}

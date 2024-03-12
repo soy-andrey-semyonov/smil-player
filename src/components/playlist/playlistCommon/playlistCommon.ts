@@ -1,29 +1,28 @@
 /* tslint:disable:Unnecessary semicolon missing whitespace */
-import { CurrentlyPlaying, CurrentlyPlayingPriority, PromiseAwaiting } from '../../../models/playlistModels';
-import { Synchronization } from '../../../models/syncModels';
-import { RegionAttributes } from '../../../models/xmlJsonModels';
-import { SMILTicker } from '../../../models/mediaModels';
-import { debug } from '../tools/generalTools';
-import { isNil } from 'lodash';
-import { SMILVideo } from '../../../models/mediaModels';
+import {CurrentlyPlaying, CurrentlyPlayingPriority, PromiseAwaiting} from '../../../models/playlistModels';
+import {Synchronization} from '../../../models/syncModels';
+import {RegionAttributes} from '../../../models/xmlJsonModels';
+import {SMILTicker, SMILVideo} from '../../../models/mediaModels';
+import {debug} from '../tools/generalTools';
+import {isNil} from 'lodash';
 import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
-import { FilesManager } from '../../files/filesManager';
-import { isConditionalExpExpired } from '../tools/conditionalTools';
-import { stopTickerAnimation } from '../tools/tickerTools';
-import { ExprTag } from '../../../enums/conditionalEnums';
-import { SMILEnums } from '../../../enums/generalEnums';
-import { IPlaylistCommon } from './IPlaylistCommon';
+import {isConditionalExpExpired} from '../tools/conditionalTools';
+import {stopTickerAnimation} from '../tools/tickerTools';
+import {ExprTag} from '../../../enums/conditionalEnums';
+import {SMILEnums} from '../../../enums/generalEnums';
+import {IPlaylistCommon} from './IPlaylistCommon';
+import {IFilesManager} from "../../files/IFilesManager";
 
 export class PlaylistCommon implements IPlaylistCommon {
 	protected sos: FrontApplet;
-	protected files: FilesManager;
+	protected files: IFilesManager;
 	protected cancelFunction: boolean[] = [];
 	protected currentlyPlaying: CurrentlyPlaying = {};
 	protected promiseAwaiting: PromiseAwaiting = {};
 	protected currentlyPlayingPriority: CurrentlyPlayingPriority = {};
 	protected synchronization: Synchronization;
 
-	constructor(sos: FrontApplet, files: FilesManager, options: any) {
+	constructor(sos: FrontApplet, files: IFilesManager, options: any) {
 		this.sos = sos;
 		this.files = files;
 		this.cancelFunction = options.cancelFunction;

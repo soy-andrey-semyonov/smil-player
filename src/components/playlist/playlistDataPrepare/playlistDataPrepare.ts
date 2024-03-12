@@ -1,28 +1,28 @@
 /* tslint:disable:Unnecessary semicolon missing whitespace */
-import { PlaylistElement, PlaylistOptions } from '../../../models/playlistModels';
-import { TriggerList } from '../../../models/triggerModels';
-import { SMILFileObject } from '../../../models/filesModels';
-import { IStorageUnit, IVideoFile } from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
-import { SMILTriggersEnum } from '../../../enums/triggerEnums';
-import { XmlTags } from '../../../enums/xmlEnums';
-import { extractAdditionalInfo, getRegionInfo, removeDigits } from '../tools/generalTools';
-import { FileStructure } from '../../../enums/fileEnums';
-import { HtmlEnum } from '../../../enums/htmlEnums';
-import { SMILEnums } from '../../../enums/generalEnums';
-import { convertRelativePathToAbsolute, getFileName, getProtocol } from '../../files/tools';
-import { createTickerElement } from '../tools/tickerTools';
-import { createDomElement } from '../tools/htmlTools';
-import { isNil, isObject } from 'lodash';
+import {PlaylistElement, PlaylistOptions} from '../../../models/playlistModels';
+import {TriggerList} from '../../../models/triggerModels';
+import {SMILFileObject} from '../../../models/filesModels';
+import {IStorageUnit, IVideoFile} from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
+import {SMILTriggersEnum} from '../../../enums/triggerEnums';
+import {XmlTags} from '../../../enums/xmlEnums';
+import {extractAdditionalInfo, getRegionInfo, removeDigits} from '../tools/generalTools';
+import {FileStructure} from '../../../enums/fileEnums';
+import {HtmlEnum} from '../../../enums/htmlEnums';
+import {SMILEnums} from '../../../enums/generalEnums';
+import {convertRelativePathToAbsolute, getFileName, getProtocol} from '../../files/tools';
+import {createTickerElement} from '../tools/tickerTools';
+import {createDomElement} from '../tools/htmlTools';
+import {isNil, isObject} from 'lodash';
 import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
-import { FilesManager } from '../../files/filesManager';
 import Debug from 'debug';
-import { PlaylistCommon } from '../playlistCommon/playlistCommon';
-import { IPlaylistDataPrepare } from './IPlaylistDataPrepare';
+import {PlaylistCommon} from '../playlistCommon/playlistCommon';
+import {IPlaylistDataPrepare} from './IPlaylistDataPrepare';
+import {IFilesManager} from "../../files/IFilesManager";
 
 const debug = Debug('@signageos/smil-player:playlistDataPrepare');
 
 export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistDataPrepare {
-	constructor(sos: FrontApplet, files: FilesManager, options: PlaylistOptions) {
+	constructor(sos: FrontApplet, files: IFilesManager, options: PlaylistOptions) {
 		super(sos, files, options);
 	}
 

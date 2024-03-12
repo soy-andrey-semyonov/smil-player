@@ -21,20 +21,21 @@ import { PlaylistProcessor } from './playlist/playlistProcessor/playlistProcesso
 import { PlaylistDataPrepare } from './playlist/playlistDataPrepare/playlistDataPrepare';
 import { applyFetchPolyfill } from '../polyfills/fetch';
 import { ISmilPlayer } from './ISmilPlayer';
+import {IFilesManager} from "./files/IFilesManager";
 
 applyFetchPolyfill();
 
 export class SmilPlayer implements ISmilPlayer {
-	private readonly files: FilesManager;
+	protected readonly files: IFilesManager;
 	private readonly smilUrl: string | undefined;
 	private xmlParser: XmlParser;
 	private playlist: SmilPlayerPlaylist;
 	private processor: PlaylistProcessor;
 	private dataPrepare: PlaylistDataPrepare;
 
-	constructor(smilUrl?: string) {
+	constructor(smilUrl?: string, files?: IFilesManager) {
 		this.smilUrl = smilUrl;
-		this.files = new FilesManager(sos);
+		this.files = files ? files : new FilesManager(sos);
 		this.xmlParser = new XmlParser();
 		this.playlist = new SmilPlayerPlaylist(sos, this.files);
 		this.processor = this.playlist.processor;

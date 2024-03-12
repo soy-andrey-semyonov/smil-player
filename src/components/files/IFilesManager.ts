@@ -27,15 +27,15 @@ export interface IFilesManager {
 		internalStorageUnit: IStorageUnit,
 		fileSrc: string,
 		taskStartDate: Date,
-		errMessage: string | null,
+		errMessage?: string | null,
 	) => Promise<void>;
 	sendMediaReport: (
 		value: SMILVideo | SMILMediaNoVideo | SosHtmlElement,
 		taskStartDate: Date,
 		itemType: MediaItemType,
-		errMessage: string | null,
+		errMessage?: string | null,
 	) => Promise<void>;
-	sendSmiFileReport: (localFilePath: string, src: string, errMessage: string | null) => Promise<void>;
+	sendSmiFileReport: (localFilePath: string, src: string, errMessage?: string | null) => Promise<void>;
 	currentFilesSetup: (
 		widgets: SMILWidget[],
 		internalStorageUnit: IStorageUnit,
@@ -61,7 +61,7 @@ export interface IFilesManager {
 		internalStorageUnit: IStorageUnit,
 		filesList: MergedDownloadList[],
 		localFilePath: string,
-		forceDownload: boolean,
+		forceDownload?: boolean,
 	) => Promise<Promise<void>[]>;
 	createFileStructure: (internalStorageUnit: IStorageUnit) => Promise<void>;
 	prepareDownloadMediaSetup: (
