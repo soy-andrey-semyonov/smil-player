@@ -14,27 +14,27 @@ describe('Files tools component', () => {
 	describe('Files tools component getFileName tests', () => {
 		it('Should return correct file name for vairous strings', () => {
 			const filesPaths = [
-				`https://butikstv.centrumkanalen.com/play/smil/234.smil`,
-				`http://butikstv.centrumkanalen.com/play/media/rendered/bilder/10826.png`,
+				`https://butikstv.test.com/play/smil/234.smil`,
+				`http://butikstv.test.com/play/media/rendered/bilder/10826.png`,
 				'localFile/inFolder/something//myfile.txt',
 				'../file.png',
 				'./../../../idontknow.mp3',
 				'fileName.mp4',
-				'https://butikstv.centrumkanalen.com/localFile/inFolder/something/my fi $ le.txt',
-				`https://butikstv.centrumkanalen.com/play/smil/234.smil?some=var&xxx=yyy`,
-				`filesystem:https://butikstv.centrumkanalen.com/persistent/play/smil/234.smil?some=var&xxx=yyy`,
+				'https://butikstv.test.com/localFile/inFolder/something/my fi $ le.txt',
+				`https://butikstv.test.com/play/smil/234.smil?some=var&xxx=yyy`,
+				`filesystem:https://butikstv.tests.com/persistent/play/smil/234.smil?some=var&xxx=yyy`,
 				'',
 			];
 			const fileNames = [
-				'234_80a6d0b5.smil',
-				'10826_802ae426.png',
+				'234_26f2f779.smil',
+				'10826_94919fb2.png',
 				'myfile.txt',
 				'file.png',
 				'idontknow.mp3',
 				'fileName.mp4',
-				'my-fi-le_45af7f07.txt',
-				'234_80a6d0b5.smil',
-				'234_e214f441.smil',
+				'my-fi-le_1d33992a.txt',
+				'234_79ca0eb1.smil',
+				'234_03fd5246.smil',
 				'',
 			];
 
@@ -70,9 +70,9 @@ describe('Files tools component', () => {
 
 		it('Should return valid path', () => {
 			const validUrls = [
-				'https://signageos-demo.s3.eu-central-1.amazonaws.com/smil/samples/assets/landscape2.jpg',
-				'https://signageos-demo.s3.eu-central-1.amazonaws.com/smil/samples/assets/portrait2.mp4',
-				'https://signageos-demo.s3.eu-central-1.amazonaws.com/smil/samples/assets/landscape1.wgt',
+				'https://demo.signageos.io/smil/samples/assets/landscape2.jpg',
+				'https://demo.signageos.io/smil/samples/assets/portrait2.mp4',
+				'https://demo.signageos.io/smil/samples/assets/landscape1.wgt',
 			];
 
 			for (let i = 0; i < validUrls.length; i += 1) {

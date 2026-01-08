@@ -4,26 +4,80 @@ signageOS SMIL Player supports HTML5 content by default.
 
 ## Basic usage
 
-An HTML Widget is a **zipped HTML5 file system tree** containing at the top level the file named "index.html" which can refer to other files using relative URLs within the zipped tree.
+An HTML Widget is a **zipped HTML5 file system tree** containing at the top level the file named "index.html" which can
+refer to other files using relative URLs within the zipped tree.
 
-A widget is loaded into a Player as a self-contained media file and **is cached in the player's storage** for offline playback. It can be accessed using the following code:
+A widget is loaded into a Player as a self-contained media file and **is cached in the player's storage** for offline
+playback. It can be accessed using the following code:
 
 ```xml
-<ref src="http://server/content.wgt" type="application/widget" dur="indefinite" />
+
+<ref src="http://server/content.wgt" type="application/widget" dur="indefinite"/>
 ```
 
 Here is an example file structure of the widget with nested folders and files:
 
-```xml
+```Text
 - images
-  --- logo.png
-- assets
-  --- js
-  ------ bundle.js
-  ------ jquery.js
-  --- css
-  ------ styles.css
-- index.html
+    --- logo.png
+    - assets
+    --- js
+    ------ bundle.js
+    ------ jquery.js
+    --- css
+    ------ styles.css
+    - index.html
+```
+
+## Passing parameters to SMIL widgets
+
+SignageOS SMIL Player allows its users to pass custom parameters into your SMIL widgets. Here is a short guide on how
+you can do this:
+
+1. Define your SMIL file and all necessary elements
+2. Create a widget element
+3. Add source URL for the widget with parameters
+    1. Parameters within URL are defined after the ? symbol and always in a Key - Value pair, these parameters are
+       defined in a standard Query string
+
+### Caching Behavior with Query Parameters
+
+Each unique combination of widget URL and query parameters is cached separately. This means:
+- The same widget with different parameters will be downloaded and cached as separate instances
+- Useful for creating dynamic widget configurations without modifying the widget itself
+- Parameters can be used for API endpoints, configuration values, or tracking
+
+Examples:
+
+```xml
+<!-- Basic widget with configuration parameters -->
+<ref src="https://website.com/production/modules/a1b2c3.wgt?appUrl=https%3A%2F%2Fanotherwebsite.com%2Fapi%2Fgraphql&amp;uniqueId=xyz123abcjhkl"
+     type="application/widget" dur="10s" region="left"/>
+
+<!-- Same widget with different parameters - cached separately -->
+<ref src="https://website.com/production/modules/a1b2c3.wgt?appUrl=https%3A%2F%2Fdifferentapi.com%2Fapi&amp;uniqueId=abc456xyz"
+     type="application/widget" dur="10s" region="right"/>
+
+<!-- Widget with multiple query parameters for dynamic configuration -->
+<ref src="https://example.com/widgets/weather.wgt?city=NYC&amp;units=metric&amp;lang=en&amp;refresh=300"
+     type="application/widget" dur="20s" region="main"/>
+```
+
+**Note:** Remember to:
+- URL-encode parameter values that contain special characters
+- Use `&amp;` instead of `&` to separate parameters in SMIL files
+- Each unique parameter combination creates a separate cache entry
+
+### How to read parameters in the widget
+
+```javascript
+// https://example.com/path/to/page?color=purple&size=M&size=L
+const queryString = window.location.search;
+const urlParams = new URLSearchParams(queryString);
+
+
+urlParams.get('color')     // purple
+urlParams.getAll('size')   // ['M', 'L']
 ```
 
 **Example of widgets:**
@@ -33,7 +87,8 @@ Here is an example file structure of the widget with nested folders and files:
 
 ## Using signageOS JS SDK within Widget
 
-The great benefit of the widget is the possibility to use signage [signageOS JS SDK](https://developers.signageos.io/sdk) within the widget. It allows you to:
+The great benefit of the widget is the possibility to use
+signage [signageOS JS SDK](https://developers.signageos.io/sdk) within the widget. It allows you to:
 
 - communicate with RS232 and sensors
 - adjust LED stripes
@@ -42,7 +97,9 @@ The great benefit of the widget is the possibility to use signage [signageOS JS 
 - and much more....
 
 ### How to allow signageOS JS SDK in the Widget
-sos is undefined and cannot use the JS SDK. In case you do not have sos object available, you need to manually add it to your project by one of the following options:
+
+sos is undefined and cannot use the JS SDK. In case you do not have sos object available, you need to manually add it to
+your project by one of the following options:
 
 **Option A)**
 
@@ -62,4 +119,6 @@ const sos = require('@signageos/front-applet');
 <script src="..path/to/the/front-applet.js" />
 ```
 
-You can manually download the library here: https://2.signageos.io/lib/front-applet/4.15.0/bundle.js. You can also download any other version by changing the 4.15.0. to [another version that is available](https://docs.signageos.io/hc/en-us/articles/4409188685074).
+You can manually download the library here: https://2.signageos.io/lib/front-applet/4.15.0/bundle.js. You can also
+download any other version by changing the 4.15.0.
+to [another version that is available](https://docs.signageos.io/hc/en-us/articles/4409188685074).

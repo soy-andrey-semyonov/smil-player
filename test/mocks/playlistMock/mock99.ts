@@ -49,7 +49,10 @@ export const mockSMILFileParsed99 = {
 	},
 	refresh: {
 		expr: undefined,
-		refreshInterval: 90,
+		refreshInterval: 90000,
+		smilFileRefresh: 90000,
+		timeOut: 2000,
+		fallbackToPreviousPlaylist: false,
 	},
 	rootLayout: {
 		width: '1920',
@@ -59,7 +62,10 @@ export const mockSMILFileParsed99 = {
 		left: '0',
 		regionName: 'rootLayout',
 	},
-	log: false,
+	logger: {
+		enabled: false,
+		type: ['standard'],
+	},
 	onlySmilFileUpdate: false,
 	playlist: {
 		systemComponent: 'http://www.w3.org/1999/xhtml',
@@ -244,6 +250,7 @@ export const mockSMILFileParsed99 = {
 		{ dur: 'indefinite', src: 'adapi:blankScreen' },
 	],
 	audio: [],
+	dynamic: {},
 	intro: [
 		{
 			repeatCount: 'indefinite',
@@ -254,4 +261,7 @@ export const mockSMILFileParsed99 = {
 	transition: {},
 	triggerSensorInfo: {},
 	triggers: {},
+	skipContentOnHttpStatus: [],
+	updateContentOnHttpStatus: [],
+	updateMechanism: 'last-modified',
 };

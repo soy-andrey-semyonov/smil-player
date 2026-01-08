@@ -5,9 +5,8 @@
 /.idea/
 /cache/
 /src/testing/
-/package-lock.json
-/.npmrc
 /cypress/videos/
 /cypress/screenshots/
 /cypress/testFiles/testing.smil
+/cypress/testFiles/testing.smil2
 /es5

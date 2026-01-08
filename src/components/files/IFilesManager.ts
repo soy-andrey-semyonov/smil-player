@@ -8,24 +8,27 @@ import {
 	SMILWidget,
 	SosHtmlElement,
 } from '../../models/mediaModels';
-import {
-	CheckETagFunctions,
-	MediaInfoObject,
-	MergedDownloadList,
-	SMILFile,
-	SMILFileObject,
-} from '../../models/filesModels';
+import { MediaInfoObject, MergedDownloadList, SMILFile, SMILFileObject } from '../../models/filesModels';
+import { SmilLogger } from '../../models/xmlJsonModels';
+import { Resource } from './resourceChecker/resourceChecker';
+import { FetchStrategy } from './fetchingStrategies/fetchingStrategies';
+
+export type { FetchStrategy };
+
+export interface UpdateCheckResult {
+	shouldUpdate: boolean;
+	value?: string;
+}
 
 export interface IFilesManager {
 	setSmilUrl: (url: string) => void;
-	setSmiLogging: (smilLogging: boolean) => void;
+	setSmiLogging: (smilLogging: SmilLogger) => void;
 	sendReport: (message: Report) => Promise<void>;
 	sendGeneralErrorReport: (message: string) => Promise<void>;
 	sendDownloadReport: (
 		fileType: ItemType,
 		localFilePath: string,
-		internalStorageUnit: IStorageUnit,
-		fileSrc: string,
+		value: MergedDownloadList,
 		taskStartDate: Date,
 		errMessage?: string | null,
 	) => Promise<void>;
@@ -33,45 +36,40 @@ export interface IFilesManager {
 		value: SMILVideo | SMILMediaNoVideo | SosHtmlElement,
 		taskStartDate: Date,
 		itemType: MediaItemType,
+		isMediaSynced: boolean,
 		errMessage?: string | null,
 	) => Promise<void>;
 	sendSmiFileReport: (localFilePath: string, src: string, errMessage?: string | null) => Promise<void>;
-	currentFilesSetup: (
-		widgets: SMILWidget[],
-		internalStorageUnit: IStorageUnit,
-		smilObject: SMILFileObject,
-		smilUrl: string,
-	) => Promise<void>;
+	currentFilesSetup: (widgets: SMILWidget[], smilObject: SMILFileObject, smilUrl: string) => Promise<void>;
 	getFileDetails: (
 		media: SMILVideo | SMILImage | SMILWidget | SMILAudio,
 		internalStorageUnit: IStorageUnit,
 		fileStructure: string,
 	) => Promise<IFile | null>;
 	shouldUpdateLocalFile: (
-		internalStorageUnit: IStorageUnit,
 		localFilePath: string,
 		media: MergedDownloadList,
 		mediaInfoObject: MediaInfoObject,
-	) => Promise<boolean>;
-	writeMediaInfoFile: (internalStorageUnit: IStorageUnit, mediaInfoObject: object) => Promise<void>;
-	deleteFile: (internalStorageUnit: IStorageUnit, filePath: string) => Promise<void>;
-	readFile: (internalStorageUnit: IStorageUnit, filePath: string) => Promise<string>;
-	fileExists: (internalStorageUnit: IStorageUnit, filePath: string) => Promise<boolean>;
+		timeOut: number,
+		skipContentHttpStatusCodes: number[],
+		updateContentHttpStatusCodes: number[],
+		fetchStrategy: FetchStrategy,
+	) => Promise<UpdateCheckResult>;
+	writeMediaInfoFile: (mediaInfoObject: object) => Promise<void>;
+	deleteFile: (filePath: string) => Promise<void>;
+	readFile: (filePath: string) => Promise<string>;
+	fileExists: (filePath: string) => Promise<boolean>;
 	parallelDownloadAllFiles: (
-		internalStorageUnit: IStorageUnit,
 		filesList: MergedDownloadList[],
 		localFilePath: string,
+		timeOut: number,
+		skipContentHttpStatusCodes: number[],
+		updateContentHttpStatusCodes: number[],
+		fetchStrategy: FetchStrategy,
 		forceDownload?: boolean,
-	) => Promise<Promise<void>[]>;
-	createFileStructure: (internalStorageUnit: IStorageUnit) => Promise<void>;
-	prepareDownloadMediaSetup: (
-		internalStorageUnit: IStorageUnit,
-		smilObject: SMILFileObject,
-	) => Promise<Promise<void>[]>;
-	prepareLastModifiedSetup: (
-		internalStorageUnit: IStorageUnit,
-		smilObject: SMILFileObject,
-		smilFile: SMILFile,
-	) => Promise<CheckETagFunctions>;
-	fetchLastModified: (fileSrc: string) => Promise<null | string | number>;
+		latestRemoteValue?: number | string,
+	) => Promise<{ promises: Promise<void>[]; filesToUpdate: Map<string, number | string> }>;
+	createFileStructure: () => Promise<void>;
+	prepareDownloadMediaSetup: (smilObject: SMILFileObject) => Promise<Promise<void>[]>;
+	prepareLastModifiedSetup: (smilObject: SMILFileObject, smilFile: SMILFile) => Promise<Resource[]>;
 }

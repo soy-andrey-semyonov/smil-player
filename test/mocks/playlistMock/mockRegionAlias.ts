@@ -13,7 +13,10 @@ export const mockSMILFileParsedRegionAlias = {
 	},
 	refresh: {
 		expr: undefined,
-		refreshInterval: 60,
+		refreshInterval: 60000,
+		smilFileRefresh: 60000,
+		timeOut: 2000,
+		fallbackToPreviousPlaylist: false,
 	},
 	rootLayout: {
 		width: '1080',
@@ -23,7 +26,10 @@ export const mockSMILFileParsedRegionAlias = {
 		left: '0',
 		regionName: 'rootLayout',
 	},
-	log: false,
+	logger: {
+		enabled: false,
+		type: ['standard'],
+	},
 	onlySmilFileUpdate: true,
 	playlist: {
 		systemComponent: 'http://www.w3.org/1999/xhtml',
@@ -285,6 +291,7 @@ export const mockSMILFileParsedRegionAlias = {
 		},
 	],
 	audio: [{ src: 'http://butikstv.centrumkanalen.com/play/render/widgets/hktorslanda/music.mp3', dur: '20' }],
+	dynamic: {},
 	intro: [
 		{
 			repeatCount: 'indefinite',
@@ -295,4 +302,7 @@ export const mockSMILFileParsedRegionAlias = {
 	transition: {},
 	triggerSensorInfo: {},
 	triggers: {},
+	skipContentOnHttpStatus: [],
+	updateContentOnHttpStatus: [],
+	updateMechanism: 'last-modified',
 };

@@ -1,6 +1,20 @@
 import { RegionAttributes, TransitionAttributes } from './xmlJsonModels';
 import StreamProtocol from '@signageos/front-applet/es6/FrontApplet/Stream/StreamProtocol';
 
+export type PoPAttributes = {
+	popName?: string;
+	popCustomId?: string;
+	popType?: 'video' | 'image' | 'html' | 'custom';
+	popTags?: string;
+	popFileName?: string;
+};
+
+export type UpdateChecks = {
+	updateCheckUrl?: string;
+	updateCheckInterval?: number;
+	allowLocalFallback?: boolean;
+};
+
 export type SMILVideo = {
 	id?: string;
 	expr?: string;
@@ -14,11 +28,16 @@ export type SMILVideo = {
 	region: string;
 	lastModified?: number;
 	localFilePath: string;
+	useInReportUrl: string;
 	playing?: boolean;
 	regionInfo: RegionAttributes;
 	media?: string;
 	triggerValue?: string;
-};
+	dynamicValue?: string;
+	syncGroupName?: string;
+	wasUpdated?: boolean;
+} & PoPAttributes &
+	UpdateChecks;
 
 export type SMILAudio = {
 	id?: string;
@@ -31,10 +50,15 @@ export type SMILAudio = {
 	lastModified?: number;
 	regionInfo: RegionAttributes;
 	localFilePath: string;
+	useInReportUrl: string;
 	playing?: boolean;
 	triggerValue?: string;
+	dynamicValue?: string;
+	syncGroupName?: string;
+	wasUpdated?: boolean;
 	'z-index': string;
-};
+} & PoPAttributes &
+	UpdateChecks;
 
 export type SMILImage = {
 	id?: string;
@@ -49,10 +73,15 @@ export type SMILImage = {
 	regionInfo: RegionAttributes;
 	transitionInfo?: TransitionAttributes;
 	localFilePath: string;
+	useInReportUrl: string;
 	playing?: boolean;
 	triggerValue?: string;
+	dynamicValue?: string;
+	syncGroupName?: string;
+	wasUpdated?: boolean;
 	'z-index': string;
-};
+} & PoPAttributes &
+	UpdateChecks;
 
 export type SMILWidget = {
 	id?: string;
@@ -67,15 +96,21 @@ export type SMILWidget = {
 	regionInfo: RegionAttributes;
 	transitionInfo?: TransitionAttributes;
 	localFilePath: string;
+	useInReportUrl: string;
 	playing?: boolean;
 	triggerValue?: string;
+	dynamicValue?: string;
+	syncGroupName?: string;
+	wasUpdated?: boolean;
 	'z-index': string;
-};
+} & PoPAttributes &
+	UpdateChecks;
 
 export type SMILTicker = {
 	id?: string;
 	expr?: string;
 	src: string;
+	useInReportUrl: string;
 	text: string[] | string;
 	fontName?: string;
 	fontSize?: string;
@@ -95,22 +130,33 @@ export type SMILTicker = {
 	transitionInfo?: TransitionAttributes;
 	playing?: boolean;
 	triggerValue?: string;
+	dynamicValue?: string;
+	syncGroupName?: string;
 	'z-index': string;
+	wasUpdated?: boolean;
 	timeoutReference?: ReturnType<typeof setTimeout>;
-};
+} & PoPAttributes &
+	UpdateChecks;
 
+// TODO: check if still necessary
 export type SosHtmlElement = {
 	expr?: string;
 	src: string;
 	id: string;
+	syncIndex?: number;
 	dur?: string;
 	media?: string;
 	playing?: boolean;
 	isTrigger?: boolean;
 	triggerValue?: string;
+	dynamicValue?: string;
+	syncGroupName?: string;
 	regionInfo: RegionAttributes;
+	transitionInfo?: TransitionAttributes;
 	localFilePath: string;
-};
+	useInReportUrl?: string;
+} & PoPAttributes &
+	UpdateChecks;
 
 export type SMILIntro = {
 	expr?: string;

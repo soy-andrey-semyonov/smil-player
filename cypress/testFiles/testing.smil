@@ -1,0 +1,32 @@
+<smil>
+    <head>
+        <layout>
+            <root-layout width="1080" height="1920" backgroundColor="#FFFFFF"></root-layout>
+            <region regionName="fullscreen" left="0" top="0" width="1080" height="1920" z-index="1"
+                    backgroundColor="#000000" sync="false"></region>
+        </layout>
+        <meta http-equiv="Refresh" content="20" timeOut="5000" fallbackToPreviousPlaylist="true" onlySmilUpdate="false"
+              skipContentOnHttpStatus="404" smilFileRefresh="1200" updateMechanism="location"></meta>
+        <meta log="true" type="manual"
+              endpoint="https://api.hygh.tech/tymetable/api/v1/dooh/signageos/pop?screen=3eb5fcfa-0f97-4424-8d51-37041245cbab"></meta>
+        <meta defaultRepeatCount="indefinite"></meta>
+    </head>
+    <body>
+        <seq>
+            <video src="https://api.hygh.tech/tymetable/api/v1/dooh/signageos/content?screen=3eb5fcfa-0f97-4424-8d51-37041245cbab&amp;id=1"
+                   popName="signagelab_event" popType="video" popTags="video1" region="fullscreen"></video>
+            <video src="https://api.hygh.tech/tymetable/api/v1/dooh/signageos/content?screen=3eb5fcfa-0f97-4424-8d51-37041245cbab&amp;id=2"
+                   popName="signagelab_event" popType="video" popTags="video2" region="fullscreen"></video>
+            <video src="https://api.hygh.tech/tymetable/api/v1/dooh/signageos/content?screen=3eb5fcfa-0f97-4424-8d51-37041245cbab&amp;id=3"
+                   popName="signagelab_event" popType="video" popTags="video3" region="fullscreen"></video>
+            <video src="https://api.hygh.tech/tymetable/api/v1/dooh/signageos/content?screen=3eb5fcfa-0f97-4424-8d51-37041245cbab&amp;id=4"
+                   popName="signagelab_event" popType="video" popTags="video4" region="fullscreen"></video>
+            <video src="https://api.hygh.tech/tymetable/api/v1/dooh/signageos/content?screen=3eb5fcfa-0f97-4424-8d51-37041245cbab&amp;id=5"
+                   popName="signagelab_event" popType="video" popTags="video5" region="fullscreen"></video>
+            <video src="https://api.hygh.tech/tymetable/api/v1/dooh/signageos/content?screen=3eb5fcfa-0f97-4424-8d51-37041245cbab&amp;id=6"
+                   popName="signagelab_event" popType="video" popTags="video6" region="fullscreen"></video>
+            <video src="https://api.hygh.tech/tymetable/api/v1/dooh/signageos/content?screen=3eb5fcfa-0f97-4424-8d51-37041245cbab&amp;id=7"
+                   popName="signagelab_event" popType="video" popTags="video7" region="fullscreen"></video>
+        </seq>
+    </body>
+</smil>

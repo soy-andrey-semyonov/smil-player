@@ -1,5 +1,7 @@
 import { SMILSensors, SMILTriggers } from './triggerModels';
+import { smilLogging } from '../enums/fileEnums';
 
+// TODO: fix any
 export type RegionsObject = {
 	region: {
 		[key: string]: RegionAttributes;
@@ -7,12 +9,26 @@ export type RegionsObject = {
 	rootLayout?: RootLayout;
 	refresh: {
 		refreshInterval: number;
+		smilFileRefresh: number;
 		expr?: string;
+		timeOut: number;
+		fallbackToPreviousPlaylist: boolean;
 	};
 	onlySmilFileUpdate: boolean;
-	log: boolean;
+	logger: SmilLogger;
 	syncServerUrl?: string;
+	defaultRepeatCount?: '1' | 'indefinite';
+	defaultTransition?: string;
+	skipContentOnHttpStatus: number[];
+	updateContentOnHttpStatus: number[];
+	updateMechanism: 'location' | 'last-modified';
 	[key: string]: any;
+};
+
+export type SmilLogger = {
+	enabled: boolean;
+	type?: (smilLogging.standard | smilLogging.proofOfPlay)[];
+	endpoint?: string;
 };
 
 export type TransitionsObject = {
@@ -55,11 +71,22 @@ export type XmlHeadObject = {
 };
 
 export type SMILMetaObject = {
-	content: string;
+	content?: string;
+	contentRefresh?: string;
+	smilFileRefresh?: string;
 	log: boolean | string;
+	type?: smilLogging.standard | smilLogging.proofOfPlay;
+	endpoint?: string;
 	onlySmilUpdate: boolean | string;
 	expr?: string;
+	timeOut?: string;
 	syncServerUrl?: string;
+	defaultRepeatCount?: '1' | 'indefinite';
+	defaultTransition?: string;
+	skipContentOnHttpStatus?: string;
+	updateContentOnHttpStatus?: string;
+	fallbackToPreviousPlaylist?: boolean;
+	updateMechanism?: string;
 };
 
 export type RegionAttributes = {
@@ -80,6 +107,8 @@ export type RegionAttributes = {
 export type TransitionAttributes = {
 	transitionName: string;
 	type: string;
-	subType: string;
+	subtype: string;
 	dur: string;
+	columnCount?: number;
+	direction?: 'right' | 'left';
 };
