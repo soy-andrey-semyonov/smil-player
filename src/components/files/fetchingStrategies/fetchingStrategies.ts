@@ -3,6 +3,7 @@ import { ConditionalExprFormat } from '../../../enums/conditionalEnums';
 import { createDownloadPath, debug } from '../tools';
 import { DEFAULT_LAST_MODIFIED } from '../../../enums/fileEnums';
 import { SMILEnums } from '../../../enums/generalEnums';
+import {getAuthHeaders} from "../../../polyfills/getAuthHeaders";
 
 type XhrRequestFunction = (
 	method: string,
@@ -37,7 +38,7 @@ const locationHeaderStrategy: FetchStrategy = async (
 			delete media.expr;
 		}
 
-		const authHeaders = window.getAuthHeaders?.(downloadUrl);
+		const authHeaders = await getAuthHeaders(downloadUrl);
 		response = await makeXhrRequest('HEAD', downloadUrl, timeOut, authHeaders);
 	} catch (err) {
 		// Handle timeout specifically
@@ -129,7 +130,7 @@ const lastModifiedStrategy: FetchStrategy = async (
 		}
 
 		const downloadUrl = createDownloadPath(media.updateCheckUrl ?? media.src);
-		const authHeaders = window.getAuthHeaders?.(downloadUrl);
+		const authHeaders = await getAuthHeaders(downloadUrl);
 
 		response = await makeXhrRequest('HEAD', downloadUrl, timeOut, authHeaders);
 	} catch (err) {

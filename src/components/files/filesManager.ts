@@ -49,6 +49,7 @@ import { Resource } from './resourceChecker/resourceChecker';
 import { FetchStrategy } from './IFilesManager';
 import { getStrategy } from './fetchingStrategies/fetchingStrategies';
 import { SMILEnums } from '../../enums/generalEnums';
+import {getAuthHeaders} from "../../polyfills/getAuthHeaders";
 
 declare global {
 	interface Window {
@@ -496,7 +497,7 @@ export class FilesManager implements IFilesManager {
 									downloadUrl = createDownloadPath(file.src);
 								}
 								debug(`Using downloadUrl: %s for file: %s`, downloadUrl, file.src);
-								const authHeaders = window.getAuthHeaders?.(downloadUrl);
+								const authHeaders = await getAuthHeaders(downloadUrl);
 
 								await this.sos.fileSystem.downloadFile(
 									{
