@@ -1,6 +1,5 @@
 const webpack = require('webpack');
 const path = require('path');
-const { CheckerPlugin } = require('awesome-typescript-loader');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const SignageOSPlugin = require('@signageos/webpack-plugin');
 
@@ -24,13 +23,13 @@ module.exports = (_env, argv) => {
 			rules: [
 				{
 					test: /\.tsx?$/,
-					loader: 'awesome-typescript-loader',
+					loader: 'ts-loader',
 					include: path.resolve(__dirname, 'src'),
 					options: {
-						useCache: true,
-						cacheDirectory: 'cache/awesome-typescript',
-						forceIsolatedModules: true,
-						reportFiles: ['src/**/*.{ts,tsx}', 'test/**/*.{ts,tsx}'],
+						transpileOnly: true,
+	
+	
+	
 					},
 				},
 				{
@@ -72,7 +71,6 @@ module.exports = (_env, argv) => {
 					  }
 					: {}),
 			}),
-			new CheckerPlugin(),
 			new HtmlWebpackPlugin({
 				template: 'public/index.html',
 				inlineSource: '.(js|css)$', // embed all javascript and css inline

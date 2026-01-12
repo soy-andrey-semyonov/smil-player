@@ -1,6 +1,6 @@
 {
   "name": "@signageos/smil-player",
-  "version": "9.9.8",
+  "version": "3.2.7",
   "description": "SMIL player",
   "main": "dist/index.html",
   "files": [
@@ -10,7 +10,7 @@
     "CHANGELOG.md",
     "package.json",
     "public",
-    "es5"
+    "es6"
   ],
   "engines": {
     "node": ">=16",
@@ -36,7 +36,7 @@
     "declarations": "tsc -p tsconfig.declarations.json",
     "start": "webpack-dev-server --mode development --open-emulator",
     "start-cypress": "webpack-dev-server --mode none --open-emulator",
-    "escheck": "es-check --module es5 dist/index.js",
+    "escheck": "es-check --module es6 dist/index.js",
     "check": "npm run depcheck && npx --userconfig ./.npmrc @signageos/lib-ci check-deps",
     "depcheck": "depcheck --config .depcheckrc.json"
   },
@@ -65,7 +65,7 @@
     "@types/node": "16.18.70",
     "@types/xml2js": "0.4.9",
     "@types/xmldom": "0.1.31",
-    "awesome-typescript-loader": "5.2.1",
+    "ts-loader": "^8.4.0",
     "babel-loader": "8.1.0",
     "cache-loader": "4.1.0",
     "cors-anywhere": "0.4.1",
@@ -79,7 +79,7 @@
     "html-webpack-plugin": "3.2.0",
     "mockdate": "3.0.5",
     "tslint": "6.1.1",
-    "typescript": "3.8.3",
+    "typescript": "4.3.5",
     "webpack": "4.46.0",
     "webpack-cli": "3.3.11",
     "webpack-dev-server": "3.11.0"

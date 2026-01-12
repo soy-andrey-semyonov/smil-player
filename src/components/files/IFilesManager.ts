@@ -72,4 +72,8 @@ export interface IFilesManager {
 	createFileStructure: () => Promise<void>;
 	prepareDownloadMediaSetup: (smilObject: SMILFileObject) => Promise<Promise<void>[]>;
 	prepareLastModifiedSetup: (smilObject: SMILFileObject, smilFile: SMILFile) => Promise<Resource[]>;
+	setLocalStorageUnit(unit: IStorageUnit): void;
+	getOrCreateMediaInfoFile(filesList: MergedDownloadList[]): Promise<MediaInfoObject>;
+	updateMediaInfoAfterDownloads(mediaInfoObject: MediaInfoObject, filesToUpdate: Map<string, number | string>): Promise<void>;
+	watchCustomEndpointReports(): Promise<void>;
 }

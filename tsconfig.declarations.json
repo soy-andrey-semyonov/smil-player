@@ -2,7 +2,7 @@
   "extends": "./tsconfig",
   "compilerOptions": {
     "declaration": true,
-    "outDir": "es5",
+    "outDir": "es6",
     "emitDeclarationOnly": false,
     "skipDefaultLibCheck": true,
     "skipLibCheck": true,
@@ -13,6 +13,7 @@
     "types": []
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "config/**/*.ts"
   ]
 }
