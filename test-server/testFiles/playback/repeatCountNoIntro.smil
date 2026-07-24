@@ -1,0 +1,45 @@
+<smil>
+    <head>
+        <meta http-equiv="refresh" content="10"/>
+        <layout>
+            <!-- define the screen resolution -->
+            <root-layout width="1920" height="1080" backgroundColor="#18182cccc" />
+
+            <!-- define the screen layout, in this case single fullscreen zone -->
+            <region regionName="main" left="0" top="0" width="1920" height="1080" z-index="1" backgroundColor="#18182c"/>
+        </layout>
+    </head>
+    <body>
+        <par>
+            <!-- Downloading resources into the internal storage -->
+            <seq>
+                <prefetch src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4" />
+                <prefetch src="https://static.signageos.io/assets/video-test-2_e2ffa51f6a4473b815f39e7fb39239da.mp4" />
+                <prefetch src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg" />
+                <prefetch src="https://demo.signageos.io/smil/samples/assets/landscape2.jpg" />
+
+                <seq id="__prefetchEnd" dur="1s" />
+            </seq>
+
+            <!-- Wait for the prefetch of media files, once done, start the playback -->
+            <par begin="__prefetchEnd.endEvent" repeatCount="indefinite">
+
+                <!-- indefinite loop of media files in the selected order -->
+                <seq repeatCount="indefinite">
+
+                    <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4" region="main" soundLevel="0%"></video>
+
+                    <seq repeatCount="2">
+                        <img dur="3s" src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg" region="main" fit="fill"></img>
+                        <img dur="3s" src="https://demo.signageos.io/smil/samples/assets/landscape2.jpg" region="main" fit="fill"></img>
+                    </seq>
+
+                    <seq repeatCount="2">
+                        <video src="https://static.signageos.io/assets/video-test-2_e2ffa51f6a4473b815f39e7fb39239da.mp4" region="main" soundLevel="0%"></video>
+                    </seq>
+
+                </seq>
+            </par>
+        </par>
+    </body>
+</smil>

@@ -27,9 +27,17 @@ The following example will play both `<seq>` playlists at the same time. Each `<
 </par>
 ```
 
+> Parallelism is effectively **per region**: children of a `<par>` targeting *different* regions run concurrently
+> (as above), while media elements placed directly in a `<par>` but sharing the *same* region still play one after
+> another — a region shows one element at a time. For parallel playback, structure the `<par>` as one child
+> `<seq>`/`<par>` per region.
+
 ## Slide Show with Background music
 
-Audio tag is not yet supported.
+> The `<audio>` tag is **not supported** — audio elements in the playlist are ignored at playback time (see
+> [Audio](../media/audio.md)). The classic a-smil pattern below is shown for reference only; on the signageOS SMIL
+> Player the slide show would play silently. Avoid `<audio>` elements in production playlists — their files are still
+> downloaded and consume storage.
 
 ```xml
 <par>
@@ -44,9 +52,5 @@ Audio tag is not yet supported.
 
 </par>
 ```
-
-The parallel schedule has two children: a sequential playlist containing 3 still images, and a single audio media object. The sequential playlist and the audio object start simultaneously, achieving the effect of a slide show of 3 photos while music plays in the background. The sequential playlist is the simplest form of playlists in SMIL.
-
-In a sequential playlist, media objects are played in the order they are listed in the SMIL playlist. One media object starts playing after the proceeding one ends.
 
 Source: [a-smil.org](https://www.a-smil.org/index.php/Main_Page)

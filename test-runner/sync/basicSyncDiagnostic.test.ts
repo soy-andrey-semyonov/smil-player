@@ -1,0 +1,97 @@
+import { test } from '../fixtures';
+import { createSyncGroup, cleanupSyncGroup, uniqueGroupName, SyncDevice } from '../syncHelpers';
+import {
+	waitForMasterElection,
+	waitForConvergence,
+	assertSynchronizedTransition,
+} from './syncAssertions';
+import { recordSkew } from '../../tools/record-sync-skew.mjs';
+
+// Diagnostic test: proves sync is operational AND transitions are tight. Uses
+// `assertSynchronizedTransition` (not just eventual convergence) so a device
+// that drifts more than MAX_SKEW_MS from the others fails the test.
+//
+// Tolerance: 1000ms. Observed skew against sync.signage-cdn.com is mostly
+// <50ms with occasional spikes to ~500ms when the public sync server has
+// network jitter. The 500ms cap was previously hit on a single transition
+// (513ms — both slaves lagged master together by ~510ms, indicating a
+// sync round-trip spike). 1000ms gives 2× headroom over observed worst-case
+// while still catching the 60s slave-stall failure shape (8ef7571 class) by
+// 60×.
+
+const MAX_SKEW_MS = 1000;
+
+test.describe.configure({ mode: 'serial' });
+test.describe('sync diagnostic', () => {
+	let devices: SyncDevice[] = [];
+
+	test.afterEach(async () => {
+		await cleanupSyncGroup(devices);
+		devices = [];
+	});
+
+	test('3 devices transition landscape1 ↔ landscape2 within 1000ms of each other', async ({
+		browser,
+		testServerBaseUrl,
+	}, testInfo) => {
+		devices = await createSyncGroup(browser, {
+			smilUrl: `${testServerBaseUrl}/syncFiles/basicSyncDiagnostic.smil`,
+			groupName: uniqueGroupName(testInfo.title),
+			deviceCount: 3,
+		});
+
+		await waitForMasterElection(devices, 60_000);
+
+		const landscape1 = (p: typeof devices[0]['page']) =>
+			p.frameLocator('iframe').locator('img[src*="landscape1"]');
+		const landscape2 = (p: typeof devices[0]['page']) =>
+			p.frameLocator('iframe').locator('img[src*="landscape2"]');
+
+		// Initial convergence — first-load noise can be large, don't measure skew.
+		await waitForConvergence(devices, landscape1, 90_000);
+
+		// Measure transition 1 → 2. landscape2 is not yet visible; Promise.all
+		// subscribes on all devices, Date.now() captured on resolve.
+		const l2 = await assertSynchronizedTransition(devices, landscape2, {
+			maxSkewMs: MAX_SKEW_MS,
+			timeoutMs: 30_000,
+			label: 'landscape1 → landscape2',
+		});
+		// eslint-disable-next-line no-console
+		console.log(
+			`[sync-diagnostic] landscape1→landscape2 skew=${l2.skewMs}ms (per-device offsets from first: ${l2.timestamps
+				.map((t) => t - l2.minTs)
+				.join('ms, ')}ms)`,
+		);
+		recordSkew({
+			test: testInfo.title,
+			label: 'landscape1→landscape2',
+			skewMs: l2.skewMs,
+			offsets: l2.timestamps.map((t) => t - l2.minTs),
+		});
+
+		// Wait for landscape1 to be hidden everywhere so the next waitFor(visible)
+		// captures the fresh cycle-2 appearance rather than the stale cycle-1 DOM.
+		await Promise.all(
+			devices.map((d) => landscape1(d.page).first().waitFor({ state: 'hidden', timeout: 10_000 })),
+		);
+
+		const l1 = await assertSynchronizedTransition(devices, landscape1, {
+			maxSkewMs: MAX_SKEW_MS,
+			timeoutMs: 30_000,
+			label: 'landscape2 → landscape1 (cycle 2)',
+		});
+		// eslint-disable-next-line no-console
+		console.log(
+			`[sync-diagnostic] landscape2→landscape1 skew=${l1.skewMs}ms (per-device offsets from first: ${l1.timestamps
+				.map((t) => t - l1.minTs)
+				.join('ms, ')}ms)`,
+		);
+		recordSkew({
+			test: testInfo.title,
+			label: 'landscape2→landscape1',
+			skewMs: l1.skewMs,
+			offsets: l1.timestamps.map((t) => t - l1.minTs),
+		});
+	});
+});

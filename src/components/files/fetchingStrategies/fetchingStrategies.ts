@@ -3,6 +3,7 @@ import { ConditionalExprFormat } from '../../../enums/conditionalEnums';
 import { createDownloadPath, debug } from '../tools';
 import { DEFAULT_LAST_MODIFIED } from '../../../enums/fileEnums';
 import { SMILEnums } from '../../../enums/generalEnums';
+import { UpdateCheckResult } from '../IFilesManager';
 
 type XhrRequestFunction = (
 	method: string,
@@ -18,21 +19,36 @@ export interface FetchStrategy {
 		skipContentHttpStatusCodes: number[],
 		updateContentHttpStatusCodes: number[],
 		makeXhrRequest: XhrRequestFunction,
-	): Promise<string | null>;
+	): Promise<UpdateCheckResult>;
 	strategyType?: string;
 }
 
-const locationHeaderStrategy: FetchStrategy = async (
-	media,
-	timeOut,
-	skipContentHttpStatusCodes = [],
-	updateContentHttpStatusCodes = [],
-	makeXhrRequest,
-) => {
+interface StrategyCallbacks {
+	prefix: string;
+	// Value used when the request times out or hits a server/skip error.
+	// location uses media.src, lastModified uses DEFAULT_LAST_MODIFIED.
+	fallbackValue: (media: MergedDownloadList) => string | undefined;
+	// Report URL derived from the HEAD response (stored on media.useInReportUrl).
+	getReportUrl: (response: Response, media: MergedDownloadList) => string;
+	// Value to return when an update is forced (updateContentHttpStatusCodes match).
+	onUpdateContent: (response: Response, reportUrl: string, media: MergedDownloadList) => string;
+	// Final resolved value on a normal (non-forced) successful response.
+	extractFinalValue: (response: Response, reportUrl: string, media: MergedDownloadList) => string;
+}
+
+async function executeHeadRequest(
+	media: MergedDownloadList,
+	timeOut: number,
+	skipContentHttpStatusCodes: number[] = [],
+	updateContentHttpStatusCodes: number[] = [],
+	makeXhrRequest: XhrRequestFunction,
+	callbacks: StrategyCallbacks,
+): Promise<UpdateCheckResult> {
+	const { prefix } = callbacks;
 	let response: Response;
 	const downloadUrl = createDownloadPath(media.updateCheckUrl ?? media.src);
+
 	try {
-		// Reset skipContent expression if it exists
 		if (media.expr === ConditionalExprFormat.skipContent) {
 			delete media.expr;
 		}
@@ -40,177 +56,119 @@ const locationHeaderStrategy: FetchStrategy = async (
 		const authHeaders = window.getAuthHeaders?.(downloadUrl);
 		response = await makeXhrRequest('HEAD', downloadUrl, timeOut, authHeaders);
 	} catch (err) {
-		// Handle timeout specifically
 		if (err.message === 'Request timeout') {
-			debug('Request to %s was aborted due to timeout.', media.src, timeOut);
-			return media.src; // Return original URL on timeout
+			debug('[files] %s request aborted (timeout=%d): src=%s', prefix, timeOut, media.src);
+			return { shouldUpdate: false, value: callbacks.fallbackValue(media), statusCode: 408 };
 		}
 
-		// Log other errors with more detail
-		debug('HEAD request to %s failed with error: %O', media.src, err);
+		debug('[files] %s HEAD request failed: src=%s, error=%O', prefix, media.src, err);
 
-		// Handle local fallback based on configuration
 		if (media.allowLocalFallback === false) {
-			debug('allowLocalFallback is false. Skipping content.', media.src);
+			debug('[files] %s skipping content (no local fallback): src=%s', prefix, media.src);
 			media.expr = ConditionalExprFormat.skipContent;
 		} else {
-			debug('allowLocalFallback is true. Proceeding with local fallback.', media.src);
+			debug('[files] %s using local fallback: src=%s', prefix, media.src);
 		}
-		return null;
+		return { shouldUpdate: false, value: undefined, statusCode: 503 };
 	}
 
+	const reportUrl = callbacks.getReportUrl(response, media);
+	media.useInReportUrl = reportUrl;
+	debug('[files] %s HEAD response: src=%s, status=%d, reportUrl=%s', prefix, media.src, response.status, reportUrl);
+
+	// Get Content-Length from the HEAD response.
+	let contentLength = parseInt(response?.headers?.get('content-length') || '0', 10) || 0;
+	// The API may return 204 with Content-Length: 0 while the real file size is on
+	// the CDN URL (resolved via the Location header). Fetch the actual content URL
+	// to learn the size for the pre-download space check.
 	const resourceLocation = response?.headers?.get('location') ?? response.url;
-
-	debug('Received response when calling HEAD request for url: %s: %O, %d', downloadUrl, response, timeOut);
-
-	// Use Location header if it exists, otherwise use media.src
-	if (response && resourceLocation) {
-		media.useInReportUrl = resourceLocation;
-		debug('Using Location header for reporting: %s', resourceLocation);
-	} else {
-		media.useInReportUrl = media.src;
-		debug('Using original source URL for reporting: %s', media.src);
+	if (resourceLocation && resourceLocation !== downloadUrl && contentLength === 0) {
+		try {
+			const cdnAuthHeaders = window.getAuthHeaders?.(resourceLocation);
+			const cdnResponse = await makeXhrRequest('HEAD', resourceLocation, timeOut, cdnAuthHeaders);
+			contentLength = parseInt(cdnResponse?.headers?.get('content-length') || '0', 10) || 0;
+			debug('[files] %s content-length from CDN HEAD: %d bytes for %s', prefix, contentLength, resourceLocation);
+		} catch (err) {
+			debug('[files] %s CDN HEAD request failed for %s: %O', prefix, resourceLocation, err);
+			// Best-effort: fall back to 0 (will use MINIMAL_STORAGE_FREE_SPACE)
+		}
 	}
 
-	// Handle server errors (5xx)
 	if (response.status >= 500 && response.status < 600) {
-		debug('Server returned error code: %s for media: %s', response.status, media.src);
+		debug('[files] %s server error: status=%d, src=%s', prefix, response.status, media.src);
 
 		if (media.allowLocalFallback === false) {
-			debug('allowLocalFallback is false. Skipping content.');
+			debug('[files] %s skipping content (no local fallback): src=%s', prefix, media.src);
 			media.expr = ConditionalExprFormat.skipContent;
 		} else {
-			debug('allowLocalFallback is true or undefined (legacy). Proceeding with local fallback.');
+			debug('[files] %s using local fallback: src=%s', prefix, media.src);
 		}
-
-		return media.src; // Return original URL on server error
+		return { shouldUpdate: false, value: callbacks.fallbackValue(media), statusCode: response.status };
 	}
 
-	// Handle skip content status codes
 	if (response && skipContentHttpStatusCodes.includes(response.status)) {
-		debug(
-			'Response code: %s for media: %s is included in skipContentHttpStatusCodes: %s, skipping content',
-			response.status,
-			media.src,
-			skipContentHttpStatusCodes,
-		);
+		debug('[files] %s skipping content (status=%d matched skip codes): src=%s', prefix, response.status, media.src);
 		media.expr = ConditionalExprFormat.skipContent;
+		return { shouldUpdate: false, value: callbacks.fallbackValue(media), statusCode: response.status };
 	}
 
-	// Handle update content status codes
 	if (response && updateContentHttpStatusCodes.includes(response.status)) {
-		debug(
-			'Response code: %s for media: %s is included in updateContentHttpStatusCodes: %s, forcing update',
-			response.status,
-			media.src,
-			updateContentHttpStatusCodes,
-		);
-		// if there is no location return url
-		return resourceLocation ?? media.src;
+		debug('[files] %s forcing update (status=%d matched update codes): src=%s', prefix, response.status, media.src);
+		return {
+			shouldUpdate: true,
+			value: callbacks.onUpdateContent(response, reportUrl, media),
+			statusCode: response.status,
+			contentLength,
+		};
 	}
 
-	// Return the Location header after redirects or original URL if not available
-	debug('Final Location header for media: %s, location: %s', media.src, resourceLocation);
-	return resourceLocation || media.src;
+	return {
+		shouldUpdate: true,
+		value: callbacks.extractFinalValue(response, reportUrl, media),
+		statusCode: response.status,
+		contentLength,
+	};
+}
+
+const locationCallbacks: StrategyCallbacks = {
+	prefix: '[location]',
+	fallbackValue: (media) => media.src,
+	getReportUrl: (response, media) => {
+		const resourceLocation = response?.headers?.get('location') ?? response.url;
+		return resourceLocation || media.src;
+	},
+	onUpdateContent: (_response, reportUrl, media) => reportUrl ?? media.src,
+	extractFinalValue: (_response, reportUrl, media) => {
+		debug('[files] resolved location: src=%s, location=%s', media.src, reportUrl);
+		return reportUrl || media.src;
+	},
 };
 
-const lastModifiedStrategy: FetchStrategy = async (
-	media,
-	timeOut,
-	skipContentHttpStatusCodes = [],
-	updateContentHttpStatusCodes = [],
-	makeXhrRequest,
-) => {
-	let response: Response;
-	try {
-		// Reset skipContent expression if it exists
-		if (media.expr === ConditionalExprFormat.skipContent) {
-			delete media.expr;
-		}
-
-		const downloadUrl = createDownloadPath(media.updateCheckUrl ?? media.src);
-		const authHeaders = window.getAuthHeaders?.(downloadUrl);
-
-		response = await makeXhrRequest('HEAD', downloadUrl, timeOut, authHeaders);
-	} catch (err) {
-		// Handle timeout specifically
-		if (err.message === 'Request timeout') {
-			debug('Request to %s was aborted due to timeout.', media.src);
-			return null;
-		}
-
-		// Log other errors
-		debug('HEAD request to %s failed with error: %O', media.src, err);
-
-		// Handle local fallback based on configuration
-		if (media.allowLocalFallback === false) {
-			debug('allowLocalFallback is false. Skipping content.', media.src);
-			media.expr = ConditionalExprFormat.skipContent;
-		} else {
-			debug('allowLocalFallback is true. Proceeding with local fallback.', media.src);
-		}
-		return null;
-	}
-
-	debug('Received response when calling HEAD request for url: %s: %O', media.src, response, timeOut);
-
-	// Extract URL from response if it exists, otherwise use media.src
-	if (response && response.url) {
-		media.useInReportUrl = response.url || media.src;
-		debug('Using response URL for reporting: %s', response.url);
-	} else {
-		media.useInReportUrl = media.src;
-		debug('Using original source URL for reporting: %s', media.src);
-	}
-
-	// Handle server errors (5xx)
-	if (response.status >= 500 && response.status < 600) {
-		debug('Server returned error code: %s for media: %s', response.status, media.src);
-
-		if (media.allowLocalFallback === false) {
-			debug('allowLocalFallback is false. Skipping content.');
-			media.expr = ConditionalExprFormat.skipContent;
-		} else {
-			debug('allowLocalFallback is true or undefined (legacy). Proceeding with local fallback.');
-		}
-
-		return null;
-	}
-
-	// Handle skip content status codes
-	if (response && skipContentHttpStatusCodes.includes(response.status)) {
-		debug(
-			'Response code: %s for media: %s is included in skipContentHttpStatusCodes: %s, skipping content',
-			response.status,
-			media.src,
-			skipContentHttpStatusCodes,
-		);
-		media.expr = ConditionalExprFormat.skipContent;
-	}
-
-	// Handle update content status codes
-	if (response && updateContentHttpStatusCodes.includes(response.status)) {
-		debug(
-			'Response code: %s for media: %s is included in updateContentHttpStatusCodes: %s, forcing update',
-			response.status,
-			media.src,
-			updateContentHttpStatusCodes,
-		);
-
-		// Create a future date in the same format as DEFAULT_LAST_MODIFIED
+const lastModifiedCallbacks: StrategyCallbacks = {
+	prefix: '[lastModified]',
+	fallbackValue: () => DEFAULT_LAST_MODIFIED,
+	getReportUrl: (response, media) => response?.url || media.src,
+	onUpdateContent: (_response, _reportUrl, media) => {
 		const futureDate = new Date();
 		futureDate.setFullYear(futureDate.getFullYear() + 1);
 		const futureDateString = futureDate.toUTCString();
-
-		debug('Forcing update by returning future date: %s', futureDateString);
+		debug('[files] forcing update (future date): src=%s, date=%s', media.src, futureDateString);
 		return futureDateString;
-	}
-
-	// Get last-modified header or use default
-	const newLastModified = response?.headers?.get('last-modified');
-	debug('New last-modified header received for media: %s, last-modified: %s', media.src, newLastModified);
-	return newLastModified || DEFAULT_LAST_MODIFIED;
+	},
+	extractFinalValue: (response, _reportUrl, media) => {
+		const newLastModified = response?.headers?.get('last-modified');
+		debug('[files] last-modified: src=%s, value=%s', media.src, newLastModified);
+		return newLastModified || DEFAULT_LAST_MODIFIED;
+	},
 };
+
+const locationHeaderStrategy: FetchStrategy = async (
+	media, timeOut, skipContentHttpStatusCodes, updateContentHttpStatusCodes, makeXhrRequest,
+) => executeHeadRequest(media, timeOut, skipContentHttpStatusCodes, updateContentHttpStatusCodes, makeXhrRequest, locationCallbacks);
+
+const lastModifiedStrategy: FetchStrategy = async (
+	media, timeOut, skipContentHttpStatusCodes, updateContentHttpStatusCodes, makeXhrRequest,
+) => executeHeadRequest(media, timeOut, skipContentHttpStatusCodes, updateContentHttpStatusCodes, makeXhrRequest, lastModifiedCallbacks);
 
 // Add strategy type identifiers
 locationHeaderStrategy.strategyType = SMILEnums.location;

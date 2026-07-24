@@ -1,0 +1,27 @@
+<smil>
+    <head>
+        <!-- Location-header update strategy: each <img> src is an API path that
+             204+redirects (Location header) to the real content URL. Both slots
+             below redirect to the SAME shared content, so the player must
+             download it ONCE and copy it for the second slot (copy-only dedup). -->
+        <meta http-equiv="refresh" content="60" updateMechanism="location"/>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#000000"/>
+            <region regionName="main" left="0" top="0" width="1920" height="1080" z-index="1"/>
+        </layout>
+    </head>
+    <body>
+        <par>
+            <seq repeatCount="indefinite">
+                <!-- slot-one and slot-two are distinct src paths (distinct on-disk
+                     filenames + DOM ids) that both resolve to /dedup/content/shared.jpg. -->
+                <img dur="3s"
+                     src="http://localhost:3000/dedup/redirect/slot-one"
+                     region="main" fit="fill"/>
+                <img dur="3s"
+                     src="http://localhost:3000/dedup/redirect/slot-two"
+                     region="main" fit="fill"/>
+            </seq>
+        </par>
+    </body>
+</smil>

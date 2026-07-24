@@ -1,4 +1,4 @@
-# Backup Image
+# Content Caching
 
 signageOS SMIL Player automatically caches SMIL files, all media, and widgets into the internal memory of the device to
 allow playback in case there is no network connection.
@@ -7,6 +7,9 @@ allow playback in case there is no network connection.
 
 The content is stored in persistent storage on the device. The SMIL Player downloads files only once (in the first SMIL
 file load), then all media files and widgets are stored and available even after the device reboot.
+
+Note: the media cache is keyed to the SMIL URL. If the configured `smilUrl` changes, the cache is invalidated and all
+media is re-checked/re-downloaded from scratch.
 
 ## What happens if some content is not played anymore (SMIL changed)? Is it deleted from disk immediately?
 
@@ -17,10 +20,21 @@ If any media files or widgets are no longer needed they are deleted once:
 - a new SMIL file is added
 - the current SMIL file gets some media/content updated
 
+Before deletion, recently replaced content is first moved into an internal preservation area (up to 20 files per media
+type, oldest evicted first). If the same content URL later reappears in the playlist, the file is restored from there
+instead of being re-downloaded.
+
 ## Is there an automatic file/cache-cleanup implemented in the device?
 
 Any changes implemented in the SMIL file or when the new content is added, all files which are no longer needed are
 removed.
+
+## Storage limits
+
+The player enforces a minimum free-space floor of **100 MB** (plus a 10% safety margin) on every download and internal
+copy. When an operation would drop free space below the floor, it is skipped and the element keeps its previous content
+(or plays nothing if it was never downloaded). If content unexpectedly fails to update on a device, check the free
+storage first.
 
 ## How to control update mechanisms?
 
@@ -39,8 +53,8 @@ This separation allows:
 - **Flexible strategies**: Different update frequencies for content vs playlist configuration
 
 **Default behavior:**
-- Media files: Use `contentRefresh` or `content` attribute value
-- SMIL file: Checks every 24 hours (86400 seconds) by default, or use `smilFileRefresh` to customize
+- Media files: Use `contentRefresh` or `content` attribute value (default: 20 seconds when neither is set)
+- SMIL file: Uses the same interval as media files by default; use `smilFileRefresh` to set a different one
 
 ### Disable Media Update Checks
 
@@ -88,14 +102,23 @@ With this configuration:
 - The playlist continues with the next available content
 - No black screens or playback interruption occurs
 
+Only 4xx codes (e.g. 403, 404, 410) can be listed here. **5xx server errors are handled separately before this list is
+consulted**, so listing 500/503 has no effect — for 5xx errors the player plays the cached copy, unless the element
+sets `allowLocalFallback="false"` (which then skips it on *any* 5xx).
+
 ### Forced Content Updates
 
 The `updateContentOnHttpStatus` attribute provides an additional update trigger mechanism alongside last-modified headers:
 
 ```xml
-<!-- Force re-download on specific status codes -->
-<meta http-equiv="Refresh" content="60" updateContentOnHttpStatus="200,205"/>
+<!-- Force re-download when the server signals an update with a dedicated status code -->
+<meta http-equiv="Refresh" content="60" updateContentOnHttpStatus="226"/>
 ```
+
+**Never list `200` (or any code your server returns on every ordinary check) here.** A healthy origin answers `200` to
+every update check, so listing it forces a full re-download of every media file on every refresh interval, forever —
+burning bandwidth and device storage. Use a distinctive out-of-band code (such as `226 IM Used`) that your server
+returns only when it wants to force a refresh. As with the skip list, 5xx codes have no effect here.
 
 How update detection works:
 1. **Primary mechanism**: The `Last-Modified` header is compared against the previously stored value. Any change triggers a re-download — not just newer timestamps, but also rollbacks to older versions. If the server does not send a `Last-Modified` header, the file is treated as unchanged to avoid false re-downloads.
@@ -113,18 +136,17 @@ Combine both attributes for complete control:
 
 ```xml
 <meta http-equiv="Refresh" content="60" 
-      skipContentOnHttpStatus="403,404,500,503"
-      updateContentOnHttpStatus="200,205"/>
+      skipContentOnHttpStatus="403,404"
+      updateContentOnHttpStatus="226"/>
 ```
 
 Common status codes:
-- **Skip codes**:
+- **Skip codes** (4xx only — 5xx entries are ignored, see above):
   - 404 - Not Found
   - 403 - Forbidden
-  - 500 - Internal Server Error
-  - 503 - Service Unavailable
-- **Update codes**:
-  - 200 - OK (force refresh on success)
+  - 410 - Gone
+- **Update codes** (must be a code the server returns *only* when forcing a refresh):
+  - 226 - IM Used (recommended out-of-band signal)
   - 205 - Reset Content (explicit refresh request)
 
 This is particularly useful for:
@@ -144,6 +166,7 @@ For fine-grained control over update behavior, you can add attributes directly t
 | `updateCheckUrl` | string | same as `src` | Alternative URL for checking updates |
 | `updateCheckInterval` | number | from meta tag | Custom update interval in seconds |
 | `allowLocalFallback` | boolean | true | Use cached content when server errors occur |
+| `playCheckUrl` | string | none | Playability gate: HEAD before each play; skips the pass when the status is listed in `<meta skipPlaybackOnHttpStatus>` (required). No effect on downloads/updates. See [Media Update Configuration](media-update-configuration.md#playcheckurl-playability-gate) |
 
 ### Example Usage
 
@@ -169,9 +192,11 @@ For fine-grained control over update behavior, you can add attributes directly t
 - Different update frequencies for different content within the same playlist
 
 **allowLocalFallback**
-- Set to `false` to skip content when server is unreachable (ensures fresh content only)
+- Set to `false` to skip content when the update check fails with a network error or a 5xx server error
 - Set to `true` (default) to play cached version during connectivity issues
 - Useful for time-sensitive content that shouldn't display outdated versions when stale
+- Note: an update check that *times out* (see `timeOut`) always plays from cache, even with
+  `allowLocalFallback="false"`
 
 ## URLs with Query Parameters
 
@@ -210,61 +235,35 @@ When using query parameters in SMIL files, remember to properly XML-encode the a
 3. **A/B Testing**: Use parameters to serve different versions for testing
 4. **Dynamic Content**: Pass contextual information through query parameters
 
-## `<prefetch>` (legacy caching method)
+## `<prefetch>` (legacy compatibility)
 
 > The section below is to maintain compatibility with the legacy SMIL systems.
 
-> **signageOS SMIL Player automatically caches** all files in the SMIL playlist in the internal memory and deletes old
-> files which are no longer in need. You do not have to define them in the `prefetch` tag.
+**signageOS SMIL Player automatically caches** all files referenced by playable elements in the SMIL playlist
+(`<video>`, `<img>`, `<ref>`, `<audio>`) into internal memory and deletes old files which are no longer needed. You do
+not have to — and cannot — prefetch files via the `prefetch` tag.
 
-Media files used in SMIL are loaded "on-the-fly" as they are used for the first time. After they have been played once,
-they
-are kept in the cache storage. Unless storage runs out, media files are played from the cache storage when they are
-played subsequently.
+The `<prefetch>` tag itself is accepted for compatibility with legacy SMIL playlists but is **ignored**: a file
+referenced *only* by a `<prefetch>` tag is never downloaded. All caching is driven by the playable elements in the
+playlist.
 
-## Prefetching a file
-
-The following SMIL code segment loads "movie.mpg" into the cache without playing it.
-
-```xml
-
-<prefetch src="http://server/movie.mpg"/>
-<prefetch src="movie.mpg"/>
-```
-
-Usually it is used while media is played in foreground. See sample code in the section below.
-
-> Relative paths have to **start with the folder or file name**. If you want to use relative paths to the SMIL playlist
-> location - e.g.: `<prefetch src="movie.mpg" />`, never start the URL with `.` or `/`. That would be an invalid path. >
-
-## Example
+The related legacy pattern that **is** supported is the intro/preloader gate: a `<seq end="__prefetchEnd.endEvent">`
+block plays a loader until all playlist media has been downloaded, after which the main
+`<par begin="__prefetchEnd.endEvent">` content starts. See the
+[Hello World tutorial](../tutorials/hello-world-playlist.md) for a complete example.
 
 ```xml
-<!-- Parallel playback sequence, all below is happening at the same time -->
 <par>
-
-    <!-- Preloader to show something before the full content is loaded and ready -->
-    <!-- This <seq> will happen first, followed by the next <seq> -->
-    <seq>
+    <!-- Preloader: plays until all media referenced by the playlist is cached -->
+    <seq end="__prefetchEnd.endEvent">
         <seq repeatCount="indefinite">
-            <!-- Play waiting prompt -->
-            <!-- Play waiting prompt animation -->
+            <video src="https://demo.signageos.io/smil/zones/files/loader.mp4"/>
         </seq>
     </seq>
 
-    <!-- Download resources into the internal storage -->
-    <seq>
-        <prefetch src="https://demo.signageos.io/smil/zones/files/video_1.mp4"/>
-        <prefetch src="https://demo.signageos.io/smil/zones/files/video_2.mp4"/>
-        <prefetch src="https://demo.signageos.io/smil/zones/files/img_1.jpg"/>
-        <prefetch src="https://demo.signageos.io/smil/zones/files/img_2.jpg"/>
-        <prefetch src="https://demo.signageos.io/smil/zones/files/widget_image_1.png"/>
-        <prefetch src="files/bottomWidget.wgt"/> <!-- Use proper path structure -->
-    </seq>
-
-    <!-- Once all preloads are ready, the playback of the full content will start -->
-    <par repeatCount="indefinite">
+    <!-- Main content: starts once caching completes -->
+    <par begin="__prefetchEnd.endEvent" repeatCount="indefinite">
         ....
+    </par>
+</par>
 ```
-
-Source: [a-smil.org](https://www.a-smil.org/index.php/Main_Page)

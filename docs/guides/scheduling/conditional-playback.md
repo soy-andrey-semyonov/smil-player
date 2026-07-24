@@ -31,15 +31,22 @@ functions:
 |-------------------------------------|-----------------------------------------------------------------------------------------|------------------------------------------------------------------------|
 | smil-playerId()                     | Returns playerId defined in Timing config as `playerId` in lower case.                  | expr="compare(smil-playerId(),'f1835d9f-be8f-4054-9e6c-123456789012')" |
 | smil-playerName()                   | Returns player name defined in Timing config as `playerName`.                           | expr="compare(smil-playerName(),'Entrance')"                           |
-| date()                              | Returns player's local date-time in ISO8601 format.                                     | `expr="compare(date() '2021-01-01T00:00:00')<0"`                       |
+| date()                              | Returns player's local date-time in ISO8601 format.                                     | `expr="compare(date(),'2021-01-01T00:00:00')<0"`                       |
 | gmdate()                            | Returns player's UTC date-time in ISO8601 format (ending in UTC indicator "Z").         | `expr="compare(gmdate(),'2021-01-01T00:00:00Z')<0"`                    |
-| time()                              | Returns player time in HH:MM:SS, 24 hours format                                        | `expr="compare(time(),'16:29:15')<0"`                                  |
+| time()                              | Returns player local time in HH:MM:SS, 24 hours format                                  | `expr="compare(time(),'16:29:15')<0"`                                  |
+| gmtime()                            | Returns player UTC time in HH:MM:SS, 24 hours format                                    | `expr="compare(gmtime(),'16:29:15')<0"`                                |
 | weekday()                           | Returns a number from 0 (Sunday) to 6 (Saturday) indicating player's local day-of-week. | `expr="weekday()=1"`                                                   |
 | gmweekday()                         | Returns a number from 0 (Sunday) to 6 (Saturday) indicating player's UTC day-of-week.   | `expr="gmweekday()=1"`                                                 |
 | compare(string comp1, string comp2) | Returns -1 if comp1 is "less" than comp2 as a string, 0 if equal, 1 if "greater".       | `expr="compare(date(),'2021-01-01T00:00:00')<0"`                       |
+| substring-after(date(), 'T')        | Extracts the time part of `date()` — usable as the first argument of `compare()` to compare against a time-of-day string. | `expr="compare(substring-after(date(),'T'),'12:00:00')>0"` |
+| ics()                               | Evaluates an inline iCalendar (ICS) `VEVENT` — the media plays while the event (including `RRULE` recurrences and `DURATION`) is active. Used as the first argument of `compare()` with the full ICS calendar string (CRLF-separated lines) as the second. | `expr="compare(ics(),'BEGIN:VCALENDAR ... BEGIN:VEVENT DTSTART:20210421T120000 RRULE:FREQ=DAILY DURATION:PT6H END:VEVENT END:VCALENDAR')"` |
 
 If you are working with a legacy implementation of the SMIL, you are probably using `adapi-` prefix for functions above.
 You can keep using it, signageOS SMIL Player supports these functions with or without the `adapi-` prefix.
+
+> **Expression evaluation rules:** supported comparison operators are `>=`, `<=`, `>`, `<`, `=` (there is no `!=`).
+> Logical operators are `and`/`AND` and `or`/`OR` (all-lowercase or all-uppercase only — `And` is not recognised).
+> An expression that fails to parse evaluates to **false** and the element is skipped, so always test new expressions.
 
 ### compare() in detail
 
@@ -53,6 +60,9 @@ You can keep using it, signageOS SMIL Player supports these functions with or wi
 | compare('2021-01-01T00:00:00', '2021-02-28T00:00:00') > 0  | -1               | false             |
 | compare('2021-01-01T00:00:00', '2021-01-01T00:00:00') >= 0 | 0                | true              |
 | compare('2021-12-31T00:00:00', '2021-01-01T00:00:00') > 0  | 1                | true              |
+
+> The result of `compare()` may only be evaluated **against `0`** (as in all examples above and on this page).
+> Expressions like `compare(a,b) = -1` or `compare(a,b) > 1` are not supported.
 
 ## Usage
 
@@ -70,7 +80,7 @@ This playlist will then be active every Wednesday, Thursday, Friday, and Saturda
     <!-- indefinite loop of media files in the selected order -->
     <seq repeatCount="indefinite">
         <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
-               region="top-left" soundLevel="0%"/>
+               region="top-left"/>
         <img dur="3" src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"
              region="top-left" fit="fill"/>
     </seq>
@@ -93,7 +103,7 @@ The `<par>` playlist will be active from 25th of Jan onwards.
     <!-- indefinite loop of media files in the selected order -->
     <seq repeatCount="indefinite">
         <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
-               region="top-left" soundLevel="0%"/>
+               region="top-left"/>
         <img dur="3" src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"
              region="top-left" fit="fill"/>
     </seq>
@@ -111,7 +121,7 @@ and expressions to get the desired behavior
     <!-- indefinite loop of media files in the selected order -->
     <seq repeatCount="indefinite">
         <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
-               region="top-left" soundLevel="0%"/>
+               region="top-left"/>
         <img dur="3" src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"
              region="top-left" fit="fill"/>
     </seq>

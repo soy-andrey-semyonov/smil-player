@@ -5,8 +5,8 @@ import get = require('lodash/get');
 const isUrl = require('is-url-superb');
 import moment from 'moment';
 import path from 'path';
-import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
-import { IStorageUnit } from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
+import { IFile, IStorageUnit } from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
+import { ISos } from '../../models/sosModels';
 import {
 	convertRelativePathToAbsolute,
 	createCustomEndpointMessagePayload,
@@ -16,12 +16,22 @@ import {
 	createPoPMessagePayload,
 	createSourceReportObject,
 	debug,
+	getCanonicalFileName,
 	getFileName,
+	getOfflineReportFileIndex,
+	getStorageFileName,
+	getReportUrlFromUpdateValue,
+	getUrlWithoutQueryParams,
 	isWidgetUrl,
 	mapFileType,
+	OfflineReportFileInfo,
+	pruneShadowedMediaInfoKeys,
+	shouldGateSkipForStatus,
 	shouldNotDownload,
+	shouldSkipActiveReportFile,
 	updateJsonObject,
 } from './tools';
+import { parseOfflineReportLines } from './tools/offlineReports';
 import {
 	CUSTOM_ENDPOINT_OFFLINE_INTERVAL,
 	CUSTOM_ENDPOINT_REPORT_FILE_LIMIT,
@@ -29,6 +39,7 @@ import {
 	FileStructure,
 	MINIMAL_STORAGE_FREE_SPACE,
 	smilLogging,
+	STORAGE_MAX_FILES,
 } from '../../enums/fileEnums';
 import { MediaInfoObject, MergedDownloadList, SMILFile, SMILFileObject } from '../../models/filesModels';
 import {
@@ -41,15 +52,16 @@ import {
 	SosHtmlElement,
 } from '../../models/mediaModels';
 import { CustomEndpointReport, ItemType, MediaItemType, Report } from '../../models/reportingModels';
-import { IFilesManager, UpdateCheckResult } from './IFilesManager';
+import { IFilesManager, ProcessedFileUpdate, UpdateCheckResult } from './IFilesManager';
 import { sleep } from '../playlist/tools/generalTools';
 import { SmilLogger } from '../../models/xmlJsonModels';
 import IRecordItemOptions from '@signageos/front-applet/es6/FrontApplet/ProofOfPlay/IRecordItemOptions';
 import { SMILScheduleEnum } from '../../enums/scheduleEnums';
-import { Resource } from './resourceChecker/resourceChecker';
+import { Resource, UpdateDetection } from './resourceChecker/resourceChecker';
 import { FetchStrategy } from './IFilesManager';
 import { getStrategy } from './fetchingStrategies/fetchingStrategies';
 import { SMILEnums } from '../../enums/generalEnums';
+import { ConditionalExprFormat } from '../../enums/conditionalEnums';
 
 declare global {
 	interface Window {
@@ -57,23 +69,53 @@ declare global {
 	}
 }
 
+// Type for tracking content movements between URLs
+interface ContentMovement {
+	sourceFileName: string; // The file that contains the content (e.g., "video_hashA.mp4")
+	sourceFilePath?: string; // Full path to the source file (populated later)
+	destinationFileNames: Set<string>; // Files that need this content (e.g., Set(["video_hashB.mp4"]))
+	contentValue: string | number; // The value that identifies this content (redirect URL or timestamp)
+}
+
 export class FilesManager implements IFilesManager {
-	private sos: FrontApplet;
+	private sos: ISos;
 	private smilFileUrl: string;
 	private internalStorageUnit: IStorageUnit;
 	private offlineReportsInfoObject: {
-		[key: number]: {
-			numberOfReports: number;
-		};
+		[key: number]: OfflineReportFileInfo;
 	} = {};
+	// Serialize offline report file writes against the watcher's read-and-detrack,
+	// so a save cannot append to a file the watcher is about to upload and delete.
+	private offlineReportsLock: Promise<void> = Promise.resolve();
 	private smilLogging: SmilLogger = {
 		enabled: false,
 		reportFileLimit: CUSTOM_ENDPOINT_REPORT_FILE_LIMIT,
 	};
+	// Batch update state for atomic mediaInfoObject updates
+	private batchUpdates: Map<string, string | number> = new Map();
+	// Track files downloaded to temp folders: filename -> temp path
+	private tempDownloads: Map<string, string> = new Map();
+	// Serialize prePlayCheck batch operations across concurrent regions
+	private prePlayLock: Promise<void> = Promise.resolve();
+	// Track in-progress background downloads to prevent duplicates
+	private activePrePlayDownloads: Map<string, Promise<void>> = new Map();
+	// playCheckGate re-runs every ~100ms in an all-skipped loop; warn about missing meta only once
+	private playCheckGateMissingMetaWarned: boolean = false;
+	// Deferred wasUpdated flags: set during commitBatch after file migration, not during download
+	private pendingWasUpdated: Set<MergedDownloadList> = new Set();
+	// Self-tracked free space estimate (bytes). listStorageUnits() returns stale freeSpace
+	// from the native layer, so we maintain our own running estimate by tracking downloads,
+	// copies, and deletions.
+	private estimatedFreeSpace: number = 0;
+	private sizeBytesUnavailableWarned: boolean = false;
 
-	constructor(sos: FrontApplet) {
+	constructor(sos: ISos) {
 		this.sos = sos;
 	}
+
+	public getStorageUnitType = (): string => {
+		return this.internalStorageUnit?.type ?? '';
+	};
 
 	public setSmilUrl = (url: string) => {
 		this.smilFileUrl = url;
@@ -81,6 +123,13 @@ export class FilesManager implements IFilesManager {
 
 	public setLocalStorageUnit = (internalStorageUnit: IStorageUnit) => {
 		this.internalStorageUnit = internalStorageUnit;
+		this.estimatedFreeSpace = internalStorageUnit.usableSpace || internalStorageUnit.freeSpace || 0;
+		debug(
+			'Initialized estimated free space: %d MB (usableSpace: %d, freeSpace: %d)',
+			Math.round(this.estimatedFreeSpace / (1024 * 1024)),
+			internalStorageUnit.usableSpace,
+			internalStorageUnit.freeSpace,
+		);
 	};
 
 	public setSmiLogging = (_smilLogging: SmilLogger) => {
@@ -89,83 +138,66 @@ export class FilesManager implements IFilesManager {
 
 	public sendReport = async (message: Report) => {
 		if (this.smilLogging.enabled) {
-			debug('Sending report: %O', message);
+			debug('[files] sending report: endpoint=%s', this.smilLogging?.endpoint);
 			await this.sos.command.dispatch(message);
 		}
 	};
 
 	public sendPoPReport = async (message: IRecordItemOptions) => {
 		if (this.smilLogging.enabled) {
-			debug('Sending PoP report: %O', message);
+			debug('[files] sending PoP report');
 			await this.sos.proofOfPlay.recordItemPlayed(message);
 		}
 	};
 
 	public watchCustomEndpointReports = async () => {
-		const arrayOfReportFiles = await this.sos.fileSystem.listFiles({
-			storageUnit: this.internalStorageUnit,
-			filePath: FileStructure.offlineReports,
-		});
+		// The whole pass is guarded so a transient filesystem error cannot escape
+		// into runEndlessLoop and kill offline uploading for the rest of the uptime.
+		try {
+			const arrayOfReportFiles = await this.sos.fileSystem.listFiles({
+				storageUnit: this.internalStorageUnit,
+				filePath: FileStructure.offlineReports,
+			});
 
-		debug('Number of custom endpoint report files', arrayOfReportFiles.length);
+			debug('[files] found offline report files: count=%d', arrayOfReportFiles.length);
 
-		if (arrayOfReportFiles.length > 0) {
 			for (const file of arrayOfReportFiles) {
 				try {
-					// get fileIndex of the current file
-					const fileIndex = parseInt(file.filePath.split('.csv')[0].replace(/\D/g, ''), 10);
+					const arrayOfReports = await this.collectReportsForUpload(file.filePath);
 
-					debug('getting file index for offline reports', fileIndex);
-					const fileContent = await this.sos.fileSystem.readFile({
-						storageUnit: this.internalStorageUnit,
-						filePath: file.filePath,
-					});
-
-					const arrayOfReports = fileContent
-						.split('\n')
-						.map((jsonString) => {
-							// no empty strings
-							if (jsonString.length > 0) {
-								return JSON.parse(jsonString);
-							}
-						})
-						.filter((item): item is CustomEndpointReport => item !== undefined);
-
-					// Skip the currently active file if it hasn't reached reportFileLimit yet
-					if (
-						this.offlineReportsInfoObject[fileIndex] &&
-						arrayOfReports.length < this.smilLogging.reportFileLimit
-					) {
-						debug(
-							'Skipping active batch file %d (%d/%d reports)',
-							fileIndex,
-							arrayOfReports.length,
-							this.smilLogging.reportFileLimit,
-						);
+					if (arrayOfReports === null) {
 						continue;
 					}
 
-					debug('Sending custom endpoint report file: %s', file.filePath);
-					const start = Date.now();
+					if (arrayOfReports.length > 0) {
+						debug('[files] sending offline report: file=%s', file.filePath);
+						const start = Date.now();
 
-					await this.sendCustomEndpointReport(arrayOfReports, true);
+						await this.sendCustomEndpointReport(
+							arrayOfReports.map((report) => ({ ...report, isOfflineReport: true })),
+							true,
+						);
 
-					debug('Custom endpoint report file: %s, request took: %s ms', file.filePath, Date.now() - start);
+						debug(
+							'[files] sent offline report: file=%s, took=%d ms',
+							file.filePath,
+							Date.now() - start,
+						);
+					}
 
 					await this.deleteFile(file.filePath);
 
-					// reset number of reports in file due to the bug with repeated connection issues
-					delete this.offlineReportsInfoObject[fileIndex];
-
-					debug('Custom endpoint report file deleted: %s', file.filePath);
+					debug('[files] deleted offline report: file=%s', file.filePath);
 				} catch (err) {
 					debug(
-						'Unexpected error occurred during sending custom endpoint report file: %s, error: %O',
+						'[files] error sending offline report: file=%s, error=%O',
 						file.filePath,
 						err,
 					);
 				}
 			}
+		} catch (err) {
+			debug('Unexpected error occurred during offline reports watcher pass: %O', err);
 		}
 		await sleep(CUSTOM_ENDPOINT_OFFLINE_INTERVAL);
 	};
@@ -178,10 +210,8 @@ export class FilesManager implements IFilesManager {
 			const payload = Array.isArray(message) ? message : [message];
 
 			debug(
-				'Sending custom endpoint report: %s. %O',
-				new Date().toISOString(),
+				'[files] sending custom report: endpoint=%s',
 				this.smilLogging.endpoint!,
-				payload,
 			);
 			const response = await fetch(this.smilLogging.endpoint!, {
 				method: 'POST',
@@ -191,17 +221,17 @@ export class FilesManager implements IFilesManager {
 				body: JSON.stringify(payload),
 			});
 
-			debug('Custom endpoint report send: %O', payload);
+			debug('[files] custom report sent');
 
 			if (!response.ok) {
 				throw new Error(`HTTP error! status: ${response.status}`);
 			}
 		} catch (error) {
-			debug('Unexpected error occurred during custom endpoint report:', error);
+			debug('[files] custom report error: %O', error);
 			if (offlineUpload) {
 				throw new Error('Error during offline custom endpoint report upload');
 			}
-			await this.saveCustomEndpointInfo(message as CustomEndpointReport);
+			await this.saveCustomEndpointInfo(message as CustomEndpointReport, 'failure');
 		}
 	};
 
@@ -218,26 +248,38 @@ export class FilesManager implements IFilesManager {
 		localFilePath: string,
 		value: MergedDownloadList,
 		taskStartDate: Date,
-		errMessage: string | null = null,
+		statusCode: number = 200,
+		reportUrl?: string,
 	) => {
-		if (this.smilLogging.type?.includes(smilLogging.proofOfPlay) && value.popName) {
+		// For SMIL files, always use value.src. For media files, use explicit reportUrl or fall back to value.src
+		const urlForReport = fileType === 'smil' ? value.src : (reportUrl || value.src);
+
+		if (this.smilLogging.type?.includes(smilLogging.proofOfPlay)) {
 			// to create difference between download and media played
-			value.popName = 'media-download';
-			await this.sendPoPReport(createPoPMessagePayload(value, errMessage, 'download'));
+			value.popName = fileType === 'smil' ? 'playlist-download' : 'media-download';
+			if (this.smilLogging.endpoint) {
+				debug('Custom endpoint report enabled download: %s', this.smilLogging.enabled);
+				await this.sendCustomEndpointReport(
+					createCustomEndpointMessagePayload(createPoPMessagePayload(value), urlForReport, statusCode),
+				);
+			} else {
+				await this.sendPoPReport(createPoPMessagePayload(value));
+			}
 		}
 		if (this.smilLogging.type?.includes(smilLogging.standard)) {
+			const isSuccess = statusCode === 200;
 			await this.sendReport({
 				type: 'SMIL.FileDownloaded',
 				itemType: fileType,
 				source: createSourceReportObject(
 					localFilePath,
-					value.useInReportUrl || value.src,
+					urlForReport,
 					this.internalStorageUnit.type,
 				),
 				startedAt: taskStartDate,
-				succeededAt: isNil(errMessage) ? moment().toDate() : null,
-				failedAt: isNil(errMessage) ? null : moment().toDate(),
-				errorMessage: errMessage,
+				succeededAt: isSuccess ? moment().toDate() : null,
+				failedAt: isSuccess ? null : moment().toDate(),
+				errorMessage: isSuccess ? null : `HTTP ${statusCode}`,
 			});
 		}
 	};
@@ -247,64 +289,92 @@ export class FilesManager implements IFilesManager {
 		taskStartDate: Date,
 		itemType: MediaItemType,
 		isMediaSynced: boolean,
-		errMessage: string | null = null,
+		statusCode: number = 200,
 	) => {
-		if (this.smilLogging.type?.includes(smilLogging.proofOfPlay) && value.popName) {
+		// useInReportUrl is set at playback start in playElement()
+		// Fall back to value.src for legacy cases or edge cases
+		if ('src' in value && !value.useInReportUrl) {
+			value.useInReportUrl = value.src;
+			debug('useInReportUrl not set, falling back to src: %s', value.src);
+		}
+
+		if (this.smilLogging.type?.includes(smilLogging.proofOfPlay)) {
 			// to create difference between download and media played
 			value.popName = 'media-playback';
 			if (this.smilLogging.endpoint) {
-				debug('Custom endpoint report enabled: %s', this.smilLogging.enabled);
-				const payload = createCustomEndpointMessagePayload(createPoPMessagePayload(value, errMessage));
+				debug('[files] custom endpoint report enabled: %s', this.smilLogging.enabled);
+				const payload = createCustomEndpointMessagePayload(
+					createPoPMessagePayload(value),
+					value.useInReportUrl,
+					statusCode,
+				);
 				if (value.reportMode === 'batch') {
-					debug('Report mode is batch, saving to offline storage');
-					await this.saveCustomEndpointInfo(payload);
+					debug('[files] report mode is batch, saving to offline storage');
+					await this.saveCustomEndpointInfo(payload, 'batch');
 				} else {
 					await this.sendCustomEndpointReport(payload);
 				}
 			} else {
-				await this.sendPoPReport(createPoPMessagePayload(value, errMessage));
+				await this.sendPoPReport(createPoPMessagePayload(value));
 			}
 		}
 		if (this.smilLogging.type?.includes(smilLogging.standard)) {
+			const isSuccess = statusCode === 200;
 			await this.sendReport({
 				type: isMediaSynced ? 'SMIL.MediaPlayed-Synced' : 'SMIL.MediaPlayed',
 				itemType: itemType,
 				source: 'src' in value ? createSourceReportObject(value.localFilePath, value.src) : ({} as any),
 				startedAt: taskStartDate,
-				endedAt: isNil(errMessage) ? moment().toDate() : null,
+				endedAt: isSuccess ? moment().toDate() : null,
+				failedAt: isSuccess ? null : moment().toDate(),
+				errorMessage: isSuccess ? null : `HTTP ${statusCode}`,
+			});
+		}
+	};
+
+	public sendSmiFileReport = async (localFilePath: string, src: string, errMessage: string | null = null) => {
+		if (this.smilLogging.type?.includes(smilLogging.proofOfPlay)) {
+			await this.sendCustomEndpointReport({
+				name: 'playlist-playback',
+				status: isNil(errMessage) ? 200 : 902,
+				time: Math.floor(Date.now() / 1000),
+				url: src,
+			});
+		}
+
+		if (this.smilLogging.type?.includes(smilLogging.standard)) {
+			await this.sendReport({
+				type: 'SMIL.PlaybackStarted',
+				source: createSourceReportObject(localFilePath, src),
+				succeededAt: isNil(errMessage) ? moment().toDate() : null,
 				failedAt: isNil(errMessage) ? null : moment().toDate(),
 				errorMessage: errMessage,
 			});
 		}
 	};
 
-	public sendSmiFileReport = async (localFilePath: string, src: string, errMessage: string | null = null) => {
-		await this.sendReport({
-			type: 'SMIL.PlaybackStarted',
-			source: createSourceReportObject(localFilePath, src),
-			succeededAt: isNil(errMessage) ? moment().toDate() : null,
-			failedAt: isNil(errMessage) ? null : moment().toDate(),
-			errorMessage: errMessage,
-		});
-	};
-
 	public currentFilesSetup = async (widgets: SMILWidget[], smilObject: SMILFileObject, smilUrl: string) => {
 		await this.deleteUnusedFiles(smilObject, smilUrl);
-		debug('Unused files deleted');
+		debug('[files] unused files deleted');
 
 		await this.extractWidgets(widgets);
-		debug('Widgets extracted');
+		debug('[files] widgets extracted');
 	};
 
 	public getFileDetails = async (
 		media: SMILVideo | SMILImage | SMILWidget | SMILAudio,
-		internalStorageUnit: IStorageUnit,
 		fileStructure: string,
+		suffix: string = '',
 	) => {
-		debug(`Getting file details for file: %O`, media);
+		debug('[files] getting file details: %O', media);
+		// Resolve the canonical name against the persisted mediaInfoObject so we find
+		// the file even when the SMIL src URL has no extension (the on-disk filename
+		// will have inherited it from the Location header).
+		const mediaInfoObject = await this.getOrCreateMediaInfoFile([media as MergedDownloadList]);
+		const fileName = getCanonicalFileName(media.src, mediaInfoObject);
 		return this.sos.fileSystem.getFile({
-			storageUnit: internalStorageUnit,
-			filePath: `${fileStructure}/${getFileName(media.src)}`,
+			storageUnit: this.internalStorageUnit,
+			filePath: `${fileStructure}/${fileName}${suffix}`,
 		});
 	};
 
@@ -317,40 +387,57 @@ export class FilesManager implements IFilesManager {
 		updateContentHttpStatusCodes: number[] = [],
 		fetchStrategy: FetchStrategy,
 	): Promise<UpdateCheckResult> => {
-		const currentValue = await fetchStrategy(
+		const updateCheckResult = await fetchStrategy(
 			media,
 			timeOut,
 			skipContentHttpStatusCodes,
 			updateContentHttpStatusCodes,
 			this.makeXhrRequest,
 		);
+
+		// Extract the value from UpdateCheckResult
+		const currentValue = updateCheckResult.value;
+		const statusCode = updateCheckResult.statusCode;
+
 		// file was not found
-		if (isNil(currentValue)) {
-			debug(`File was not found on remote server: %O `, media.src);
-			return { shouldUpdate: false };
+		if (isNil(updateCheckResult) || isNil(currentValue)) {
+			debug('[files] file not found on remote: %s', media.src);
+			return { shouldUpdate: false, statusCode };
+		}
+
+		// Check if content should be skipped (set by fetch strategy)
+		if (media.expr === ConditionalExprFormat.skipContent) {
+			debug('[files] content marked as skip, not downloading: %s', media.src);
+			return { shouldUpdate: false, statusCode };
 		}
 
 		if (!(await this.fileExists(createLocalFilePath(localFilePath, media.src)))) {
-			debug(`File does not exist in local storage: %s  downloading`, media.src);
+			debug('[files] file not in local storage, downloading: %s', media.src);
 			return {
 				shouldUpdate: true,
 				value: currentValue,
+				statusCode,
+				contentLength: updateCheckResult.contentLength,
 			};
 		}
 
-		const storedValue = mediaInfoObject[getFileName(media.src)];
-		debug(`Stored value for file %s: %O`, media.src, storedValue);
+		// Use the canonical key (which carries the resolved extension when applicable)
+		// so a previously-committed entry for an extensionless SMIL src still hits.
+		const storedValue = mediaInfoObject[getCanonicalFileName(media.src, mediaInfoObject)];
+		debug('[files] stored value for file: %s, value: %O', media.src, storedValue);
 
 		if (isNil(storedValue)) {
 			return {
 				shouldUpdate: true,
 				value: currentValue,
+				statusCode,
+				contentLength: updateCheckResult.contentLength,
 			};
 		}
 
 		// Location strategy uses strings as values, while lastModified uses timestamps
 		const isLocationStrategy = fetchStrategy.strategyType === SMILEnums.location;
-		debug('isLocationStrategy', isLocationStrategy);
+		debug('[files] using location strategy: %s', isLocationStrategy);
 
 		// Helper function to strip __smil_version query parameter from URL
 		const stripSmilVersion = (url: string | null): string | null => {
@@ -370,14 +457,14 @@ export class FilesManager implements IFilesManager {
 		// Debug logging for location strategy edge cases
 		if (isLocationStrategy) {
 			if (currentValue === null) {
-				debug('Location strategy: currentValue is null (request failed or no Location header)');
+				debug('[files] location strategy: currentValue is null (request failed or no Location header)');
 			}
 			if (stripSmilVersion(currentValue) === stripSmilVersion(media.src)) {
-				debug('Location strategy: currentValue equals media.src (no redirect, same URL returned)');
+				debug('[files] location strategy: currentValue equals media.src (no redirect, same URL returned)');
 			}
 			// Log the comparison values for debugging
 			debug(
-				'Location strategy comparison - currentValue: %s, media.src: %s, storedValue: %s',
+				'[files] location strategy comparison - currentValue: %s, media.src: %s, storedValue: %s',
 				stripSmilVersion(currentValue),
 				stripSmilVersion(media.src),
 				stripSmilVersion(storedValue as string),
@@ -387,26 +474,53 @@ export class FilesManager implements IFilesManager {
 		const isNewVersion = isLocationStrategy
 			? currentValue !== null &&
 				stripSmilVersion(currentValue) !== stripSmilVersion(media.src) &&
-				currentValue !== storedValue
+				// Compare without query params - same content with different query params should not trigger download
+				getUrlWithoutQueryParams(currentValue) !== getUrlWithoutQueryParams(storedValue)
 			// Skip update when server returns no Last-Modified header (DEFAULT_LAST_MODIFIED is returned as fallback).
-		// Without this guard, the epoch fallback value would differ from any real stored date, causing false re-downloads.
-		: currentValue !== DEFAULT_LAST_MODIFIED
-			&& moment(storedValue).valueOf() !== moment(currentValue).valueOf();
+			// Without this guard, the epoch fallback value would differ from any real stored date, causing false re-downloads.
+			: currentValue !== DEFAULT_LAST_MODIFIED &&
+				moment(storedValue).valueOf() !== moment(currentValue).valueOf();
 
 		if (isNewVersion) {
-			debug(`New file version detected: %O `, media.src);
+			debug('[files] new file version detected: %s', media.src);
 			return {
 				shouldUpdate: true,
 				value: currentValue,
+				statusCode,
+				contentLength: updateCheckResult.contentLength,
 			};
 		}
 
-		debug(`File is already downloaded in internal storage: %O `, media.src);
-		return { shouldUpdate: false };
+		if (!(await this.fileExists(`${localFilePath}/${getCanonicalFileName(media.src, mediaInfoObject)}`))) {
+			debug('[files] file not in local storage, downloading: %s', media.src);
+			return {
+				shouldUpdate: true,
+				value: currentValue,
+				statusCode,
+				contentLength: updateCheckResult.contentLength,
+			};
+		}
+
+		// For location strategy: if a redirect happened and only query params changed
+		// (same base URL, different full URL), return value to update mapping for reporting.
+		// Guard: stripSmilVersion check ensures a redirect actually occurred —
+		// without it, "no redirect" (server echoes webhook URL) would wrongly overwrite the stored CDN URL.
+		if (
+			isLocationStrategy &&
+			currentValue &&
+			storedValue &&
+			stripSmilVersion(currentValue) !== stripSmilVersion(media.src) &&
+			currentValue !== storedValue
+		) {
+			debug('[files] location URL query params changed, returning value for mapping update: %s', media.src);
+			return { shouldUpdate: false, value: currentValue, statusCode };
+		}
+
+		debug('[files] file already in local storage: %s', media.src);
+		return { shouldUpdate: false, statusCode };
 	};
 
 	public writeMediaInfoFile = async (mediaInfoObject: object) => {
-		debug('Writing to mediaInfo file in persistent storage: %O', mediaInfoObject);
 		await this.sos.fileSystem.writeFile(
 			{
 				storageUnit: this.internalStorageUnit,
@@ -414,12 +528,20 @@ export class FilesManager implements IFilesManager {
 			},
 			JSON.stringify(mediaInfoObject),
 		);
-		debug('Writing to mediaInfo file in persistent storage done: %O', mediaInfoObject);
+		debug('[files] wrote mediaInfo to storage: %O', mediaInfoObject);
 	};
 
 	public deleteFile = async (filePath: string) => {
+		let freedBytes = 0;
 		try {
-			debug('Deleting file from persistent storage: %s', filePath);
+			const fileInfo = await this.getFileByPath(filePath);
+			freedBytes = fileInfo?.sizeBytes || 0;
+		} catch (_) {
+			// Best-effort size lookup for space tracking
+		}
+
+		try {
+			debug('[files] deleting file: %s', filePath);
 			await this.sos.fileSystem.deleteFile(
 				{
 					storageUnit: this.internalStorageUnit,
@@ -427,8 +549,18 @@ export class FilesManager implements IFilesManager {
 				},
 				true,
 			);
+
+			if (freedBytes > 0) {
+				this.estimatedFreeSpace += freedBytes;
+				debug(
+					'Space freed: %d MB for %s (estimated free: %d MB)',
+					Math.round(freedBytes / (1024 * 1024)),
+					filePath,
+					Math.round(this.estimatedFreeSpace / (1024 * 1024)),
+				);
+			}
 		} catch (err) {
-			debug('Unexpected error occurred during deleting file from persistent storage: %s', filePath);
+			debug('[files] error deleting file: %s', filePath);
 			await this.sendGeneralErrorReport(err.message);
 		}
 	};
@@ -456,90 +588,927 @@ export class FilesManager implements IFilesManager {
 		fetchStrategy: FetchStrategy,
 		forceDownload: boolean = false,
 		latestRemoteValue?: string,
+		allFilesList?: MergedDownloadList[], // Optional full playlist for preservation check
+		externalPendingUpdates?: Map<string, string | number>, // Complete pending updates across all phases
+		// Set to true when detection already done (e.g., from processNewContentUpdates)
+		// to avoid duplicate HEAD requests
+		skipUpdateCheck: boolean = false,
+		// Content-Length from pre-existing detection (used with skipUpdateCheck)
+		latestContentLength?: number,
 	): Promise<{ promises: Promise<void>[]; filesToUpdate: Map<string, number | string> }> => {
 		const promises: Promise<void>[] = [];
 		const taskStartDate = moment().toDate();
 		const fileType = mapFileType(localFilePath);
 		const mediaInfoObject = await this.getOrCreateMediaInfoFile(filesList);
-		debug('Received media info object: %s', JSON.stringify(mediaInfoObject));
+		debug('[files] received media info: %s', JSON.stringify(mediaInfoObject));
 
 		// Create a map to track which files need to be updated in mediaInfoObject
 		const filesToUpdate: Map<string, number | string> = new Map();
 
-		await Promise.all(
-			filesList.map(async (file) => {
-				// do not download website widgets or video streams
-				if (shouldNotDownload(localFilePath, file)) {
-					debug('Will not download file: %O', file);
-					return;
-				}
+		// Check if we should use the duplicate detection approach for location header strategy
+		const isLocationStrategy = fetchStrategy.strategyType === SMILEnums.location;
 
-				// check for local urls to files (media/file.mp4)
-				file.src = convertRelativePathToAbsolute(file.src, this.smilFileUrl);
+		if (isLocationStrategy) {
+			debug('DEDUP: Starting duplicate detection for location header strategy');
 
-				const updateCheck = forceDownload
-					? {
-							shouldUpdate: true,
-							value: latestRemoteValue,
-						}
-					: await this.shouldUpdateLocalFile(
-							localFilePath,
-							file,
-							mediaInfoObject,
-							timeOut,
-							skipContentHttpStatusCodes,
-							updateContentHttpStatusCodes,
-							fetchStrategy,
-						);
-
-				// check if file is already downloaded or is forcedDownload to update existing file with new version
-				if (updateCheck.shouldUpdate) {
-					const updateValue = 'value' in updateCheck ? updateCheck.value : undefined;
-					if (updateValue) {
-						// Store the value for later update after successful download
-						filesToUpdate.set(getFileName(file.src), updateValue);
+			// Phase 1: Collect all update checks in parallel
+			const checkResults = await Promise.all(
+				filesList.map(async (file) => {
+					// do not download website widgets or video streams
+					if (shouldNotDownload(localFilePath, file)) {
+						debug('Will not download file: %O', file);
+						return null;
 					}
 
-					const fullLocalFilePath = createLocalFilePath(localFilePath, file.src);
+					// check for local urls to files (media/file.mp4)
+					file.src = convertRelativePathToAbsolute(file.src, this.smilFileUrl);
+
+					// Skip HEAD request if detection already done (e.g., from processNewContentUpdates)
+					// This avoids duplicate HEAD requests while Phase 3b.5 still checks storage/existing content
+					const updateCheck = skipUpdateCheck && latestRemoteValue
+						? {
+							shouldUpdate: forceDownload, // Respect forceDownload from detection (true for NEW_CONTENT, false for MOVED_CONTENT)
+							value: latestRemoteValue,
+							statusCode: 200,
+							contentLength: latestContentLength,
+						}
+						: forceDownload
+							? {
+								shouldUpdate: true,
+								value: latestRemoteValue,
+							}
+							: await this.shouldUpdateLocalFile(
+								localFilePath,
+								file,
+								mediaInfoObject,
+								timeOut,
+								skipContentHttpStatusCodes,
+								updateContentHttpStatusCodes,
+								fetchStrategy,
+							);
+
+					return {
+						file,
+						updateCheck,
+						// Canonical name carries the extension borrowed from the resolved
+						// Location URL when the SMIL src lacks one (e.g. ".../content").
+						fileName: getFileName(file.src, updateCheck.value as string | undefined),
+					};
+				}),
+			);
+
+			// Filter out nulls and files that don't need updates
+			const validResults = checkResults.filter(
+				(result): result is { file: MergedDownloadList; updateCheck: any; fileName: string } =>
+					result !== null && result.updateCheck.shouldUpdate && !!result.updateCheck.value,
+			);
+
+			// Phase 2: Detect duplicates based on location URL
+			// Use base URL without query params to group - same content may have different campaign IDs
+			const locationGroups = new Map<string, Array<{ file: MergedDownloadList; fileName: string }>>();
+
+			for (const result of validResults) {
+				const locationUrl = String(result.updateCheck.value);
+				const locationUrlNoQuery = getUrlWithoutQueryParams(locationUrl);
+
+				if (!locationGroups.has(locationUrlNoQuery)) {
+					locationGroups.set(locationUrlNoQuery, []);
+				}
+				locationGroups.get(locationUrlNoQuery)!.push({
+					file: result.file,
+					fileName: result.fileName,
+				});
+			}
+
+			// Log duplicates (only groups with 2+ files)
+			for (const [locationUrl, group] of locationGroups) {
+				if (group.length > 1) {
+					const urls = group.map((g) => g.file.src).join(', ');
+					debug('DEDUP: Found %d URLs pointing to same content: %s', group.length, locationUrl);
+					debug('DEDUP: Affected URLs: %s', urls);
+					debug('DEDUP: Potential download savings: %d duplicate downloads', group.length - 1);
+				}
+			}
+
+			// Phase 3a: Build download tasks (separate what needs downloading)
+			interface DownloadTask {
+				file: MergedDownloadList;
+				fileName: string;
+				updateValue: string | number;
+				isNewContent: boolean;
+				downloadPath: string;
+				fullLocalFilePath: string;
+				actualDownloadPath: string;
+				downloadUrl: string;
+				existingValue?: string | number;
+				shouldPreserve: boolean;
+				existingFilePath?: string; // Path to existing file with same content (for reuse)
+				storageFilePath?: string; // Path to file in storage with same content (Step 7)
+				statusCode: number; // HTTP status code from HEAD request
+				contentLength?: number; // Content-Length from HEAD response for pre-download space check
+			}
+
+			const downloadTasks: DownloadTask[] = [];
+			debug('Phase 3a: Building download tasks for %d files', validResults.length);
+
+			for (const result of validResults) {
+				const { file, updateCheck, fileName } = result;
+				const updateValue = updateCheck.value;
+				const statusCode = updateCheck.statusCode || 200;
+
+				// Store the value for later update after successful download
+				filesToUpdate.set(fileName, updateValue);
+
+				// Determine if this is new content that should go to temp folder
+				// When forceDownload=true, always use temp folder to ensure proper tracking
+				// This handles both NEW_CONTENT and MOVED_CONTENT scenarios
+				const isNewContent = forceDownload && updateValue;
+				const downloadPath = isNewContent ? this.getTempFolder(localFilePath) : localFilePath;
+
+				// updateValue is the resolved URL (Location header) for the location strategy.
+				// When the SMIL src has no extension (e.g. ".../content"), borrow it from the
+				// resolved URL so the on-disk filename carries the extension.
+				const fullLocalFilePath = createLocalFilePath(localFilePath, file.src, String(updateValue));
+				const actualDownloadPath = createLocalFilePath(downloadPath, file.src, String(updateValue));
+
+				// Determine download URL
+				let downloadUrl: string;
+				if (isLocationStrategy && !!updateValue && isUrl(updateValue)) {
+					// For location strategy, use the location URL directly without adding __smil_version
+					// The location header already provides the exact URL we need
+					downloadUrl = updateValue as string;
+				} else {
+					downloadUrl = createDownloadPath(file.src);
+				}
+
+				// Check if we should preserve existing file
+				const existingValue = mediaInfoObject[fileName];
+				let shouldPreserve = false;
+
+				if (existingValue) {
+					const fileExistsLocally = await this.fileExists(fullLocalFilePath);
+					if (fileExistsLocally) {
+						// Use full playlist if provided, otherwise fall back to current batch
+						const filesForCheck = allFilesList || filesList;
+						const stillNeeded = this.isContentNeededByOtherUrls(
+							existingValue,
+							file.src,
+							filesForCheck,
+							mediaInfoObject,
+							externalPendingUpdates || filesToUpdate, // Use complete pending updates if available
+						);
+						shouldPreserve = !stillNeeded;
+					}
+				}
+
+				downloadTasks.push({
+					file,
+					fileName,
+					updateValue,
+					isNewContent,
+					downloadPath,
+					fullLocalFilePath,
+					actualDownloadPath,
+					downloadUrl,
+					existingValue: existingValue || undefined,
+					statusCode,
+					shouldPreserve,
+					contentLength: updateCheck.contentLength,
+				});
+			}
+
+			// Phase 3b: Group download tasks by content (for location strategy)
+			debug('Phase 3b: Grouping %d download tasks by content', downloadTasks.length);
+
+			// Group tasks by their download URL (which represents the actual content location)
+			const taskGroups = new Map<string, DownloadTask[]>();
+
+			for (const task of downloadTasks) {
+				// Strip query params for grouping - same content with different query params should be grouped together
+				const contentKey = getUrlWithoutQueryParams(task.downloadUrl);
+
+				if (!taskGroups.has(contentKey)) {
+					taskGroups.set(contentKey, []);
+				}
+				taskGroups.get(contentKey)!.push(task);
+			}
+
+			// Log grouped structure
+			debug('Grouped download tasks into %d unique content groups:', taskGroups.size);
+			let totalDuplicates = 0;
+			taskGroups.forEach((tasks, url) => {
+				if (tasks.length > 1) {
+					debug('  Content group: %s', url);
+					debug('    - %d files need this content:', tasks.length);
+					tasks.forEach((task) => {
+						debug('      * %s (fileName: %s)', task.file.src, task.fileName);
+					});
+					totalDuplicates += tasks.length - 1;
+				}
+			});
+
+			if (totalDuplicates > 0) {
+				debug('DEDUP: Total duplicate downloads that could be optimized: %d', totalDuplicates);
+			}
+
+			// Phase 3b.5: Check for existing content that can be reused
+			debug('Phase 3b.5: Checking for existing content that can be reused');
+			for (const [contentUrl, tasks] of taskGroups) {
+				// Check if this content already exists locally (only check once per group)
+				const existingFilePath = await this.findExistingContentFile(
+					contentUrl, // The location URL is the content identifier
+					mediaInfoObject,
+				);
+
+				if (existingFilePath) {
+					// Store this info in the first task (we'll check it in Phase 3c)
+					// We only set it on the first task to keep it simple
+					tasks[0].existingFilePath = existingFilePath;
+					debug(
+						'DEDUP: Found existing content at %s for %d tasks (content: %s)',
+						existingFilePath,
+						tasks.length,
+						contentUrl,
+					);
+				} else {
+					// Step 7: Check storage as last resort before downloading
+					const storageFilePath = await this.checkStorageForContent(
+						contentUrl, // The location URL is the content identifier
+						fileType,
+					);
+
+					if (storageFilePath) {
+						// Store this info in the first task (we'll check it in Phase 3c)
+						tasks[0].storageFilePath = storageFilePath;
+						debug(
+							'DEDUP: Found content in storage at %s for %d tasks (content: %s)',
+							storageFilePath,
+							tasks.length,
+							contentUrl,
+						);
+					}
+				}
+			}
+
+			// Phase 3c: Execute download tasks with optimization (download once per content group)
+			debug('Phase 3c: Executing downloads WITH OPTIMIZATION - download once per content group');
+
+			// Collect all storage paths needed by content groups to protect from eviction
+			const protectedStoragePaths = new Set<string>();
+			for (const [, tasks] of taskGroups) {
+				if (tasks[0].storageFilePath) {
+					protectedStoragePaths.add(tasks[0].storageFilePath);
+				}
+			}
+
+			let optimizedDownloads = 0;
+			let skippedDownloads = 0;
+
+			for (const [contentUrl, tasks] of taskGroups) {
+				debug('Processing content group: %s (%d tasks)', contentUrl, tasks.length);
+
+				// Check if we found existing content for this group
+				const existingFilePath = tasks[0].existingFilePath;
+				const storageFilePath = tasks[0].storageFilePath; // Step 7: Check for storage content
+
+				if (existingFilePath) {
+					// SAFE: Copy existing content to temp for ALL tasks in group
+					debug('DEDUP: Reusing existing content from %s for %d tasks', existingFilePath, tasks.length);
+
+					for (const task of tasks) {
+						// Handle storage preservation if needed (keep existing logic)
+						if (task.shouldPreserve && task.existingValue) {
+							debug('Preserving old content to storage before copy: %s', task.fullLocalFilePath);
+							await this.preserveFileToStorage(task.fullLocalFilePath, task.existingValue, fileType, protectedStoragePaths);
+						} else if (task.existingValue && !task.shouldPreserve) {
+							debug('Content still needed by other URLs, not preserving: %s', task.existingValue);
+						}
+
+						try {
+							// Floor guard: skip the dedup copy if it would breach MINIMAL_STORAGE_FREE_SPACE
+							if (!(await this.hasFloorRoomForCopy(existingFilePath))) {
+								debug('DEDUP: Skipping copy for %s - would breach minimum free space floor', task.file.src);
+								skippedDownloads++;
+								continue;
+							}
+
+							// SAFE: Copy to temp folder
+							debug(
+								'DEDUP: Copying existing content to temp: %s -> %s',
+								existingFilePath,
+								task.actualDownloadPath,
+							);
+							await this.sos.fileSystem.copyFile(
+								{
+									storageUnit: this.internalStorageUnit,
+									filePath: existingFilePath,
+								},
+								{
+									storageUnit: this.internalStorageUnit,
+									filePath: task.actualDownloadPath,
+								},
+								{
+									overwrite: true,
+								},
+							);
+
+							debug(
+								'DEDUP: Successfully copied existing content for: %s (fileName: %s)',
+								task.file.src,
+								task.fileName,
+							);
+							await this.trackSpaceConsumed(task.actualDownloadPath);
+
+							// CRITICAL: Track in tempDownloads for migration
+							if (task.isNewContent) {
+								this.tempDownloads.set(task.fileName, task.actualDownloadPath);
+								debug('Tracked temp copy: %s -> %s', task.fileName, task.actualDownloadPath);
+							}
+
+						} catch (err) {
+							debug('DEDUP: Failed to copy existing content: %O', err);
+							// On error, we'll fall through to normal download logic below
+							// Remove the existingFilePath marker so it will download instead
+							tasks[0].existingFilePath = undefined;
+							break; // Exit the loop and proceed to download
+						}
+					}
+
+					// If we successfully copied all files, continue to next group
+					if (tasks[0].existingFilePath) {
+						optimizedDownloads++;
+						skippedDownloads += tasks.length;
+						debug('DEDUP: Successfully reused existing content for all %d tasks', tasks.length);
+						continue; // Skip to next content group
+					}
+				} else if (storageFilePath) {
+					// Step 7: Restore from storage (similar to Step 6 pattern)
+					debug('DEDUP: Restoring content from storage at %s for %d tasks', storageFilePath, tasks.length);
+
+					// Restore once for the first task
+					let restoredTempPath: string | null = null;
+					const firstTask = tasks[0];
+
+					// Handle storage preservation if needed for first task
+					if (firstTask.shouldPreserve && firstTask.existingValue) {
+						debug('Preserving old content to storage before restoration: %s', firstTask.fullLocalFilePath);
+						await this.preserveFileToStorage(
+							firstTask.fullLocalFilePath,
+							firstTask.existingValue,
+							fileType,
+							protectedStoragePaths,
+						);
+					}
+
+					try {
+						// Restore from storage to temp for the first task. Pass updateValue
+						// as the extension hint so the restored filename matches
+						// firstTask.actualDownloadPath (which already used the same fallback).
+						restoredTempPath = await this.restoreFromStorage(
+							storageFilePath,
+							firstTask.actualDownloadPath.substring(0, firstTask.actualDownloadPath.lastIndexOf('/')),
+							firstTask.file.src,
+							typeof firstTask.updateValue === 'string' ? firstTask.updateValue : undefined,
+						);
+
+						if (restoredTempPath) {
+							debug('DEDUP: Successfully restored from storage to: %s', restoredTempPath);
+
+							// For the first task, we already have the file in place
+							// Track it in tempDownloads
+							if (firstTask.isNewContent) {
+								this.tempDownloads.set(firstTask.fileName, restoredTempPath);
+								debug('Tracked restored temp file: %s -> %s', firstTask.fileName, restoredTempPath);
+							}
+
+							// Copy locally for remaining tasks in the group
+							for (let i = 1; i < tasks.length; i++) {
+								const task = tasks[i];
+
+								// Handle storage preservation if needed
+								if (task.shouldPreserve && task.existingValue) {
+									debug('Preserving old content to storage before copy: %s', task.fullLocalFilePath);
+									await this.preserveFileToStorage(
+										task.fullLocalFilePath,
+										task.existingValue,
+										fileType,
+										protectedStoragePaths,
+									);
+								}
+
+								try {
+									// Floor guard: skip if this copy would breach the minimum free space floor
+									if (!(await this.hasFloorRoomForCopy(restoredTempPath))) {
+										debug('DEDUP: Skipping restored copy for %s - would breach minimum free space floor', task.file.src);
+										continue;
+									}
+
+									// Copy the restored file to this task's temp location
+									debug(
+										'DEDUP: Copying restored content to temp: %s -> %s',
+										restoredTempPath,
+										task.actualDownloadPath,
+									);
+									await this.sos.fileSystem.copyFile(
+										{
+											storageUnit: this.internalStorageUnit,
+											filePath: restoredTempPath,
+										},
+										{
+											storageUnit: this.internalStorageUnit,
+											filePath: task.actualDownloadPath,
+										},
+										{
+											overwrite: true,
+										},
+									);
+
+									debug('DEDUP: Successfully copied restored content for: %s', task.file.src);
+									await this.trackSpaceConsumed(task.actualDownloadPath);
+
+									// Track in tempDownloads
+									if (task.isNewContent) {
+										this.tempDownloads.set(task.fileName, task.actualDownloadPath);
+										debug('Tracked temp copy: %s -> %s', task.fileName, task.actualDownloadPath);
+									}
+
+								} catch (err) {
+									debug('DEDUP: Failed to copy restored content: %O', err);
+									// Continue trying for other tasks
+								}
+							}
+
+							optimizedDownloads++;
+							skippedDownloads += tasks.length;
+							debug(
+								'DEDUP: Successfully restored and reused content from storage for %d tasks',
+								tasks.length,
+							);
+							continue; // Skip to next content group
+						}
+					} catch (err) {
+						debug('DEDUP: Failed to restore from storage: %O', err);
+						// Fall through to normal download logic
+					}
+				}
+
+				// If no existing content or copy failed, proceed with download logic
+				if (tasks.length === 1) {
+					// Single task - no optimization needed
+					const task = tasks[0];
+
+					if (task.isNewContent) {
+						debug('Using temp folder for new content: %s instead of %s', task.downloadPath, localFilePath);
+					}
+
+					// Preserve existing file to storage if needed
+					if (task.shouldPreserve && task.existingValue) {
+						debug('Preserving old content to storage before download: %s', task.fullLocalFilePath);
+						await this.preserveFileToStorage(task.fullLocalFilePath, task.existingValue, fileType, protectedStoragePaths);
+					} else if (task.existingValue && !task.shouldPreserve) {
+						debug('Content still needed by other URLs, not preserving: %s', task.existingValue);
+					}
+
+					// Download as normal for single file
 					promises.push(
 						(async () => {
-							try {
-								debug(`Downloading file: %O`, updateValue ?? file.src);
-								// Location strategy uses strings as values, while lastModified uses timestamps
-								const isLocationStrategy = fetchStrategy.strategyType === SMILEnums.location;
-								let downloadUrl: string;
+							// Check storage before downloading to prevent wasted bandwidth
+							if (!(await this.checkAvailableSpace(task.contentLength || MINIMAL_STORAGE_FREE_SPACE))) {
+								debug('[files] skipping download (insufficient storage space): %s', task.file.src);
+								filesToUpdate.delete(task.fileName);
+								return;
+							}
 
-								if (isLocationStrategy && !!updateValue && isUrl(updateValue)) {
-									downloadUrl = createDownloadPath(updateValue);
-								} else {
-									downloadUrl = createDownloadPath(file.src);
-								}
-								debug(`Using downloadUrl: %s for file: %s`, downloadUrl, file.src);
-								const authHeaders = window.getAuthHeaders?.(downloadUrl);
+							try {
+								debug('[files] downloading file: %s', task.updateValue ?? task.file.src);
+								debug('[files] using downloadUrl: %s for file: %s', task.downloadUrl, task.file.src);
+								const authHeaders = window.getAuthHeaders?.(task.downloadUrl);
 
 								await this.sos.fileSystem.downloadFile(
 									{
 										storageUnit: this.internalStorageUnit,
-										filePath: createLocalFilePath(localFilePath, file.src),
+										filePath: task.actualDownloadPath,
 									},
-									downloadUrl,
+									task.downloadUrl,
 									authHeaders,
 								);
 
-								debug(`File downloaded: %s`, updateValue ?? file.src);
+								debug('[files] file downloaded to: %s', task.actualDownloadPath);
+								await this.trackSpaceConsumed(task.actualDownloadPath);
 
-								this.sendDownloadReport(fileType, fullLocalFilePath, file, taskStartDate);
+								// Track file in temp if using temp folder
+								if (task.isNewContent) {
+									this.tempDownloads.set(task.fileName, task.actualDownloadPath);
+									debug(`Tracked temp download: %s -> %s`, task.fileName, task.actualDownloadPath);
+								}
+
+								this.sendDownloadReport(
+									fileType,
+									task.fullLocalFilePath,
+									task.file,
+									taskStartDate,
+									task.statusCode,
+									getReportUrlFromUpdateValue(task.updateValue),
+								);
 							} catch (err) {
-								debug(`Unexpected error: %O during downloading file: %s`, err, file.src);
-								this.sendDownloadReport(fileType, fullLocalFilePath, file, taskStartDate, err.message);
+								debug('[files] download error: %O, file: %s', err, task.file.src);
+								this.sendDownloadReport(
+									fileType,
+									task.fullLocalFilePath,
+									task.file,
+									taskStartDate,
+									502,
+								);
 								// Remove from filesToUpdate if download failed
-								filesToUpdate.delete(getFileName(file.src));
+								filesToUpdate.delete(task.fileName);
 							}
 						})(),
 					);
+					optimizedDownloads++;
+				} else {
+					// Multiple tasks for same content - OPTIMIZATION APPLIES
+					debug('DEDUP: Optimizing download for content group with %d files', tasks.length);
+
+					// Process the first task - this will be the primary download
+					const primaryTask = tasks[0];
+					debug(
+						'DEDUP: Primary download task: %s (fileName: %s)',
+						primaryTask.file.src,
+						primaryTask.fileName,
+					);
+
+					if (primaryTask.isNewContent) {
+						debug(
+							'Using temp folder for new content: %s instead of %s',
+							primaryTask.downloadPath,
+							localFilePath,
+						);
+					}
+
+					// Preserve existing file to storage if needed (only for primary)
+					if (primaryTask.shouldPreserve && primaryTask.existingValue) {
+						debug('Preserving old content to storage before download: %s', primaryTask.fullLocalFilePath);
+						await this.preserveFileToStorage(
+							primaryTask.fullLocalFilePath,
+							primaryTask.existingValue,
+							fileType,
+							protectedStoragePaths,
+						);
+					} else if (primaryTask.existingValue && !primaryTask.shouldPreserve) {
+						debug('Content still needed by other URLs, not preserving: %s', primaryTask.existingValue);
+					}
+
+					// Download only the primary file
+					promises.push(
+						(async () => {
+							// Check storage before downloading to prevent wasted bandwidth
+							if (!(await this.checkAvailableSpace(primaryTask.contentLength || MINIMAL_STORAGE_FREE_SPACE))) {
+								debug('Skipping dedup download for %s - insufficient storage space', primaryTask.file.src);
+								filesToUpdate.delete(primaryTask.fileName);
+								for (let i = 1; i < tasks.length; i++) {
+									filesToUpdate.delete(tasks[i].fileName);
+								}
+								return;
+							}
+
+							try {
+								debug(
+									`DEDUP: Downloading primary file: %O`,
+									primaryTask.updateValue ?? primaryTask.file.src,
+								);
+								debug(
+									`Using downloadUrl: %s for file: %s`,
+									primaryTask.downloadUrl,
+									primaryTask.file.src,
+								);
+								const authHeaders = window.getAuthHeaders?.(primaryTask.downloadUrl);
+
+								await this.sos.fileSystem.downloadFile(
+									{
+										storageUnit: this.internalStorageUnit,
+										filePath: primaryTask.actualDownloadPath,
+									},
+									primaryTask.downloadUrl,
+									authHeaders,
+								);
+
+								debug(`DEDUP: Primary file downloaded to: %s`, primaryTask.actualDownloadPath);
+								await this.trackSpaceConsumed(primaryTask.actualDownloadPath);
+
+								// Track file in temp if using temp folder
+								if (primaryTask.isNewContent) {
+									this.tempDownloads.set(primaryTask.fileName, primaryTask.actualDownloadPath);
+									debug(
+										`Tracked temp download: %s -> %s`,
+										primaryTask.fileName,
+										primaryTask.actualDownloadPath,
+									);
+								}
+
+								this.sendDownloadReport(
+									fileType,
+									primaryTask.fullLocalFilePath,
+									primaryTask.file,
+									taskStartDate,
+									primaryTask.statusCode,
+									getReportUrlFromUpdateValue(primaryTask.updateValue),
+								);
+
+								// Step 5: Copy the primary file for all other tasks in this group
+								debug('DEDUP: Copying primary file for %d duplicate URLs', tasks.length - 1);
+
+								for (let i = 1; i < tasks.length; i++) {
+									const duplicateTask = tasks[i];
+
+									try {
+										// Floor guard: skip if duplicating would breach the floor.
+										// Use Content-Length as the size fallback when the on-disk file isn't readable yet
+										// (e.g. download just landed and stats not flushed).
+										const fallback = primaryTask.contentLength || MINIMAL_STORAGE_FREE_SPACE;
+										if (!(await this.hasFloorRoomForCopy(primaryTask.actualDownloadPath, fallback))) {
+											debug('DEDUP: Skipping duplicate copy for %s - would breach minimum free space floor', duplicateTask.file.src);
+											continue;
+										}
+
+										debug(
+											'DEDUP: Copying for duplicate: %s -> %s',
+											primaryTask.actualDownloadPath,
+											duplicateTask.actualDownloadPath,
+										);
+
+										// Copy the primary file to the duplicate's location
+										await this.sos.fileSystem.copyFile(
+											{
+												storageUnit: this.internalStorageUnit,
+												filePath: primaryTask.actualDownloadPath,
+											},
+											{
+												storageUnit: this.internalStorageUnit,
+												filePath: duplicateTask.actualDownloadPath,
+											},
+											{
+												overwrite: true,
+											},
+										);
+
+										debug(
+											'DEDUP: Successfully copied file for: %s (fileName: %s)',
+											duplicateTask.file.src,
+											duplicateTask.fileName,
+										);
+										await this.trackSpaceConsumed(duplicateTask.actualDownloadPath);
+
+										// Track the copied file in temp if using temp folder
+										if (duplicateTask.isNewContent) {
+											this.tempDownloads.set(
+												duplicateTask.fileName,
+												duplicateTask.actualDownloadPath,
+											);
+											debug(
+												`Tracked temp copy: %s -> %s`,
+												duplicateTask.fileName,
+												duplicateTask.actualDownloadPath,
+											);
+										}
+
+									} catch (copyErr) {
+										debug(
+											'DEDUP: ERROR - Failed to copy for duplicate: %s, error: %O',
+											duplicateTask.file.src,
+											copyErr,
+										);
+										// Remove from filesToUpdate if copy failed
+										filesToUpdate.delete(duplicateTask.fileName);
+									}
+								}
+
+								debug('DEDUP: Copy phase complete for content group');
+							} catch (err) {
+								debug(`Unexpected error: %O during downloading file: %s`, err, primaryTask.file.src);
+								this.sendDownloadReport(
+									fileType,
+									primaryTask.fullLocalFilePath,
+									primaryTask.file,
+									taskStartDate,
+									502,
+								);
+								// Remove from filesToUpdate if download failed
+								filesToUpdate.delete(primaryTask.fileName);
+							}
+						})(),
+					);
+					optimizedDownloads++;
+					skippedDownloads += tasks.length - 1;
+
+					// Handle preservation for duplicate tasks
+					// (downloads are skipped but we still need to preserve old content if needed)
+					for (let i = 1; i < tasks.length; i++) {
+						const duplicateTask = tasks[i];
+						// Preserve existing files to storage if needed
+						if (duplicateTask.shouldPreserve && duplicateTask.existingValue) {
+							debug(
+								'Preserving old content to storage (duplicate task): %s',
+								duplicateTask.fullLocalFilePath,
+							);
+							await this.preserveFileToStorage(
+								duplicateTask.fullLocalFilePath,
+								duplicateTask.existingValue,
+								fileType,
+								protectedStoragePaths,
+							);
+						}
+						// Files will be created by copy operation after primary download
+						debug('DEDUP: Download skipped for: %s (will copy from primary)', duplicateTask.file.src);
+					}
 				}
-			}),
-		);
+			}
+
+			debug(
+				'DEDUP: Download optimization complete - Downloaded: %d, Skipped: %d',
+				optimizedDownloads,
+				skippedDownloads,
+			);
+			if (skippedDownloads > 0) {
+				debug(
+					'DEDUP: Optimization saved %d duplicate downloads (files copied locally instead)',
+					skippedDownloads,
+				);
+			}
+
+			// Also handle files that don't need download but need mediaInfoObject update
+			const noDownloadResults = checkResults.filter(
+				(result): result is { file: MergedDownloadList; updateCheck: any; fileName: string } =>
+					result !== null && !result.updateCheck.shouldUpdate && !!result.updateCheck.value,
+			);
+
+			for (const result of noDownloadResults) {
+				debug(`Updating mediaInfoObject for %s without download`, result.file.src);
+				filesToUpdate.set(result.fileName, result.updateCheck.value);
+			}
+		} else {
+			// Original logic for non-location strategies
+			await Promise.all(
+				filesList.map(async (file) => {
+					// do not download website widgets or video streams
+					if (shouldNotDownload(localFilePath, file)) {
+						debug('Will not download file: %O', file);
+						return;
+					}
+
+					// check for local urls to files (media/file.mp4)
+					file.src = convertRelativePathToAbsolute(file.src, this.smilFileUrl);
+
+					// Skip HEAD request if detection already done (e.g., from processNewContentUpdates)
+					// This avoids duplicate HEAD requests
+					const updateCheck = skipUpdateCheck && latestRemoteValue
+						? {
+							shouldUpdate: forceDownload, // Respect forceDownload from detection (true for NEW_CONTENT, false for MOVED_CONTENT)
+							value: latestRemoteValue,
+							contentLength: latestContentLength,
+						}
+						: forceDownload
+							? {
+								shouldUpdate: true,
+								value: latestRemoteValue,
+							}
+							: await this.shouldUpdateLocalFile(
+								localFilePath,
+								file,
+								mediaInfoObject,
+								timeOut,
+								skipContentHttpStatusCodes,
+								updateContentHttpStatusCodes,
+								fetchStrategy,
+							);
+
+					// check if file is already downloaded or is forcedDownload to update existing file with new version
+					if (updateCheck.shouldUpdate) {
+						const updateValue = 'value' in updateCheck ? updateCheck.value : undefined;
+						const statusCode = updateCheck.statusCode || 200;
+						// Canonical name carries the extension borrowed from the resolved URL
+						// when the SMIL src lacks one. For lastModified strategy, updateValue is
+						// a date string with no host — getFileName's host guard ignores it gracefully.
+						const canonicalName = getFileName(file.src, updateValue as string | undefined);
+						if (updateValue) {
+							// Store the value for later update after successful download
+							filesToUpdate.set(canonicalName, updateValue);
+						}
+
+						// Determine if this is new content that should go to temp folder
+						// When forceDownload=true, always use temp folder to ensure proper tracking
+						// This handles both NEW_CONTENT and MOVED_CONTENT scenarios
+						const isNewContent = forceDownload && updateValue;
+
+						// getTempFolder() is the single source of truth for whether a folder is
+						// downloaded atomically: it returns a distinct `<folder>/tmp` for the media
+						// folders (videos/images/audios/widgets) and the folder UNCHANGED for
+						// everything else — including the root SMIL folder. A file whose temp folder
+						// equals its standard folder lands on its final path directly and must NOT be
+						// tracked for temp→standard migration, or migrateFromTempToStandard would copy
+						// it onto itself and then delete it, falling the player back to the backup
+						// image instead of loading the updated playlist. Deriving the decision from
+						// getTempFolder() (not from downloadPath) keeps it correct even if the download
+						// path computation changes later.
+						const tempFolder = this.getTempFolder(localFilePath);
+						const usesTempFolder = !!isNewContent && tempFolder !== localFilePath;
+						const downloadPath = usesTempFolder ? tempFolder : localFilePath;
+
+						if (usesTempFolder) {
+							debug('Using temp folder for new content: %s instead of %s', downloadPath, localFilePath);
+						}
+
+						const fullLocalFilePath = `${localFilePath}/${canonicalName}`;
+						const actualDownloadPath = `${downloadPath}/${canonicalName}`;
+
+						// Before downloading, check if we should preserve the existing file to storage
+						const existingFileName = canonicalName;
+						const existingValue = mediaInfoObject[existingFileName];
+
+						if (existingValue && (await this.fileExists(fullLocalFilePath)) && !isNewContent) {
+							// Check if this content is needed by any other URLs
+							const stillNeeded = this.isContentNeededByOtherUrls(
+								existingValue,
+								file.src,
+								filesList,
+								mediaInfoObject,
+							);
+
+							if (!stillNeeded) {
+								debug('Preserving old content to storage before download: %s', fullLocalFilePath);
+								await this.preserveFileToStorage(fullLocalFilePath, existingValue, fileType);
+							} else {
+								debug('Content still needed by other URLs, not preserving: %s', existingValue);
+							}
+						}
+
+						promises.push(
+							(async () => {
+								// Check storage before downloading to prevent wasted bandwidth
+								if (!(await this.checkAvailableSpace(updateCheck.contentLength || MINIMAL_STORAGE_FREE_SPACE))) {
+									debug('Skipping download for %s - insufficient storage space', file.src);
+									filesToUpdate.delete(canonicalName);
+									return;
+								}
+
+								try {
+									debug(`Downloading file: %O`, updateValue ?? file.src);
+									// Location strategy uses strings as values, while lastModified uses timestamps
+									let downloadUrl: string;
+
+									if (isLocationStrategy && !!updateValue && isUrl(updateValue)) {
+										downloadUrl = createDownloadPath(updateValue);
+									} else {
+										downloadUrl = createDownloadPath(file.src);
+									}
+									debug(`Using downloadUrl: %s for file: %s`, downloadUrl, file.src);
+									const authHeaders = window.getAuthHeaders?.(downloadUrl);
+
+									await this.sos.fileSystem.downloadFile(
+										{
+											storageUnit: this.internalStorageUnit,
+											filePath: actualDownloadPath,
+										},
+										downloadUrl,
+										authHeaders,
+									);
+
+									debug(`File downloaded to: %s`, actualDownloadPath);
+									await this.trackSpaceConsumed(actualDownloadPath);
+
+									// Track file in temp if using temp folder
+									if (usesTempFolder) {
+										this.tempDownloads.set(canonicalName, actualDownloadPath);
+										debug(`Tracked temp download: %s -> %s`, canonicalName, actualDownloadPath);
+									}
+
+									this.sendDownloadReport(
+										fileType,
+										fullLocalFilePath,
+										file,
+										taskStartDate,
+										statusCode,
+										getReportUrlFromUpdateValue(updateValue),
+									);
+								} catch (err) {
+									debug(`Unexpected error: %O during downloading file: %s`, err, file.src);
+									this.sendDownloadReport(fileType, fullLocalFilePath, file, taskStartDate, 502);
+									// Remove from filesToUpdate if download failed
+									filesToUpdate.delete(canonicalName);
+								}
+							})(),
+						);
+					} else if (updateCheck.value) {
+						// File doesn't need download but we need to update the mediaInfoObject
+						// This happens when content is already downloaded but moved to a new URL
+						debug(`Updating mediaInfoObject for %s without download`, file.src);
+						filesToUpdate.set(
+							getFileName(file.src, updateCheck.value as string | undefined),
+							updateCheck.value,
+						);
+					}
+				}),
+			);
+		}
 
 		// Return both the promises array and the filesToUpdate map
 		return { promises, filesToUpdate };
@@ -552,7 +1521,7 @@ export class FilesManager implements IFilesManager {
 	): Promise<void> => {
 		// Update mediaInfoObject with successful downloads
 		filesToUpdate.forEach((value, fileName) => {
-			debug(`Updating mediaInfoObject for file: %s with value: %O`, fileName, value);
+			debug('[files] updating mediaInfo: file=%s', fileName);
 			updateJsonObject(mediaInfoObject, fileName, value);
 		});
 
@@ -566,10 +1535,15 @@ export class FilesManager implements IFilesManager {
 	public createFileStructure = async () => {
 		for (const structPath of Object.values(FileStructure)) {
 			if (await this.fileExists(structPath)) {
-				debug(`Filepath already exists: %O`, structPath);
+				debug('[files] directory exists: %s', structPath);
 				continue;
 			}
-			debug(`Create directory structure: %O`, structPath);
+			// Add specific debug for temp folders
+			if (structPath.endsWith('/tmp')) {
+				debug('[files] creating temp directory for atomic updates: %s', structPath);
+			} else {
+				debug('[files] creating directory: %s', structPath);
+			}
 			await this.sos.fileSystem.createDirectory({
 				storageUnit: this.internalStorageUnit,
 				filePath: structPath,
@@ -577,82 +1551,73 @@ export class FilesManager implements IFilesManager {
 		}
 	};
 
-	public prepareDownloadMediaSetup = async (smilObject: SMILFileObject): Promise<Promise<void>[]> => {
-		let downloadPromises: Promise<void>[] = [];
-		debug(`Starting to download files %O:`, smilObject);
+	public prepareDownloadMediaSetup = async (smilObject: SMILFileObject): Promise<void> => {
+		debug('[files] starting download batch');
 
-		// Create a map to track all files that need to be updated in mediaInfoObject
-		const allFilesToUpdate: Map<string, number | string> = new Map();
+		// Clean up orphaned temp files from any prior crashed run so they don't accumulate on disk.
+		await this.clearTempFolders();
 
-		// Get the mediaInfoObject once for all operations
-		const mediaInfoObject = await this.getOrCreateMediaInfoFile([
-			...smilObject.video,
-			...smilObject.audio,
-			...smilObject.img,
-			...smilObject.ref,
-		]);
-
-		// Get the appropriate fetch strategy based on update mechanism
 		const fetchStrategy = getStrategy(smilObject.updateMechanism);
+		const timeOut = smilObject.refresh.timeOut;
+		const skipCodes = smilObject.skipContentOnHttpStatus;
+		const updateCodes = smilObject.updateContentOnHttpStatus;
 
-		// Process each media type and collect promises and files to update
-		const videoResult = await this.parallelDownloadAllFiles(
-			smilObject.video,
-			FileStructure.videos,
-			smilObject.refresh.timeOut,
-			smilObject.skipContentOnHttpStatus,
-			smilObject.updateContentOnHttpStatus,
-			fetchStrategy,
+		// Step 1: Detect updates for all files (HEAD requests)
+		// Same as resource checker Phase 1 (detectFunction → detectUpdateOnly)
+		const fileEntries = [
+			...smilObject.video.map((f) => ({ file: f, localFilePath: FileStructure.videos })),
+			...smilObject.audio.map((f) => ({ file: f, localFilePath: FileStructure.audios })),
+			...smilObject.img.map((f) => ({ file: f, localFilePath: FileStructure.images })),
+			...smilObject.ref.map((f) => ({ file: f, localFilePath: FileStructure.widgets })),
+		];
+
+		const detections = (await Promise.all(
+			fileEntries.map((entry) =>
+				this.detectUpdateOnly(
+					entry.file, entry.localFilePath, timeOut, skipCodes, updateCodes, fetchStrategy,
+				),
+			),
+		)).filter((d): d is UpdateDetection => d !== null);
+
+		// Step 2: Classify (same as resource checker Phase 2)
+		const movedContent = detections.filter((d) => !d.needsDownload);
+		const newContent = detections.filter((d) => d.needsDownload);
+
+		debug(
+			'prepareDownloadMediaSetup: %d moved content, %d new content detections',
+			movedContent.length, newContent.length,
 		);
-		downloadPromises = downloadPromises.concat(videoResult.promises);
-		// Merge the filesToUpdate maps
-		videoResult.filesToUpdate.forEach((value, key) => allFilesToUpdate.set(key, value));
 
-		const audioResult = await this.parallelDownloadAllFiles(
-			smilObject.audio,
-			FileStructure.audios,
-			smilObject.refresh.timeOut,
-			smilObject.skipContentOnHttpStatus,
-			smilObject.updateContentOnHttpStatus,
-			fetchStrategy,
-		);
-		downloadPromises = downloadPromises.concat(audioResult.promises);
-		audioResult.filesToUpdate.forEach((value, key) => allFilesToUpdate.set(key, value));
+		const allFilesList = [
+			...smilObject.video, ...smilObject.audio,
+			...smilObject.img, ...smilObject.ref,
+		];
 
-		const imgResult = await this.parallelDownloadAllFiles(
-			smilObject.img,
-			FileStructure.images,
-			smilObject.refresh.timeOut,
-			smilObject.skipContentOnHttpStatus,
-			smilObject.updateContentOnHttpStatus,
-			fetchStrategy,
-		);
-		downloadPromises = downloadPromises.concat(imgResult.promises);
-		imgResult.filesToUpdate.forEach((value, key) => allFilesToUpdate.set(key, value));
+		// Step 3: Process using same mechanism as resource checker (Phases 3-4)
+		// The batch flow is all-or-nothing by design: files download into temp folders, then
+		// commitBatch atomically migrates them and persists mediaInfoObject. This prevents the
+		// content swap bug where per-type commits could overwrite source files before they were
+		// copied. If the player crashes before commitBatch completes, downloads are repeated on
+		// restart — acceptable because initial download is a one-time operation, and
+		// clearTempFolders() at the top of this method prevents orphaned temp files from
+		// accumulating across crashes.
+		this.startBatch();
 
-		const refResult = await this.parallelDownloadAllFiles(
-			smilObject.ref,
-			FileStructure.widgets,
-			smilObject.refresh.timeOut,
-			smilObject.skipContentOnHttpStatus,
-			smilObject.updateContentOnHttpStatus,
-			fetchStrategy,
-		);
-		downloadPromises = downloadPromises.concat(refResult.promises);
-		refResult.filesToUpdate.forEach((value, key) => allFilesToUpdate.set(key, value));
+		if (movedContent.length > 0) {
+			await this.processNewContentUpdates(movedContent, allFilesList);
+		}
 
-		// Wait for all downloads to complete
-		await Promise.all(downloadPromises);
+		if (newContent.length > 0) {
+			await this.processNewContentUpdates(newContent, allFilesList);
+		}
 
-		// Update mediaInfoObject and save to storage after all downloads are complete
-		await this.updateMediaInfoAfterDownloads(mediaInfoObject, allFilesToUpdate);
-
-		return downloadPromises;
+		// Step 4: Commit atomically (same as resource checker Phase 6)
+		await this.commitBatch(allFilesList);
 	};
 
 	public prepareLastModifiedSetup = async (smilObject: SMILFileObject, smilFile: SMILFile): Promise<Resource[]> => {
 		let resourceCheckers: Resource[] = [];
-		debug(`Starting to check files for updates %O:`, smilObject);
+		debug('[files] starting update check');
 		try {
 			// For SMIL file, always use lastModified strategy
 			const smilFetchStrategy = getStrategy(SMILEnums.lastModified);
@@ -684,6 +1649,16 @@ export class FilesManager implements IFilesManager {
 						smilObject.skipContentOnHttpStatus,
 						smilObject.updateContentOnHttpStatus,
 						mediaFetchStrategy,
+						false, // reloadPlayerOnUpdate
+						(resource) =>
+							this.detectUpdateOnly(
+								resource,
+								FileStructure.videos,
+								smilObject.refresh.timeOut,
+								smilObject.skipContentOnHttpStatus,
+								smilObject.updateContentOnHttpStatus,
+								mediaFetchStrategy,
+							),
 					),
 				);
 
@@ -696,6 +1671,16 @@ export class FilesManager implements IFilesManager {
 						smilObject.skipContentOnHttpStatus,
 						smilObject.updateContentOnHttpStatus,
 						mediaFetchStrategy,
+						false, // reloadPlayerOnUpdate
+						(resource) =>
+							this.detectUpdateOnly(
+								resource,
+								FileStructure.audios,
+								smilObject.refresh.timeOut,
+								smilObject.skipContentOnHttpStatus,
+								smilObject.updateContentOnHttpStatus,
+								mediaFetchStrategy,
+							),
 					),
 				);
 
@@ -708,6 +1693,16 @@ export class FilesManager implements IFilesManager {
 						smilObject.skipContentOnHttpStatus,
 						smilObject.updateContentOnHttpStatus,
 						mediaFetchStrategy,
+						false, // reloadPlayerOnUpdate
+						(resource) =>
+							this.detectUpdateOnly(
+								resource,
+								FileStructure.images,
+								smilObject.refresh.timeOut,
+								smilObject.skipContentOnHttpStatus,
+								smilObject.updateContentOnHttpStatus,
+								mediaFetchStrategy,
+							),
 					),
 				);
 
@@ -720,13 +1715,23 @@ export class FilesManager implements IFilesManager {
 						smilObject.skipContentOnHttpStatus,
 						smilObject.updateContentOnHttpStatus,
 						mediaFetchStrategy,
+						false, // reloadPlayerOnUpdate
+						(resource) =>
+							this.detectUpdateOnly(
+								resource,
+								FileStructure.widgets,
+								smilObject.refresh.timeOut,
+								smilObject.skipContentOnHttpStatus,
+								smilObject.updateContentOnHttpStatus,
+								mediaFetchStrategy,
+							),
 					),
 				);
 			}
 
 			return resourceCheckers;
 		} catch (err) {
-			debug('Unexpected error occurred during lastModified check setup: %O', err);
+			debug('[files] lastModified check error: %O', err);
 			// return empty arrays as if no new versions of files were found
 		}
 		return [];
@@ -743,7 +1748,7 @@ export class FilesManager implements IFilesManager {
 				createLocalFilePath(FileStructure.smilMediaInfo, FileStructure.smilMediaInfoFileName),
 			))
 		) {
-			debug('MediaInfo file not found, creating json object');
+			debug('[files] mediaInfo not found, creating new');
 			return createJsonStructureMediaInfo(filesList);
 		}
 
@@ -754,22 +1759,1439 @@ export class FilesManager implements IFilesManager {
 		try {
 			return JSON.parse(response);
 		} catch (error) {
-			debug('Cannot parse smil meta media info', error);
+			// Include a short prefix of the read content so a corrupted or
+			// truncated mediaInfo file can be diagnosed without re-reading it
+			// manually. The typed fallback keeps the happy path unchanged.
+			debug(
+				'[files] cannot parse media info: snippet=%s, error=%O',
+				(response ?? '').slice(0, 100),
+				error,
+			);
 			return createJsonStructureMediaInfo(filesList);
 		}
 	};
 
-	private checkLastModified = async (
+	/**
+	 * One-time startup migration: drop stale extensionless mediaInfo keys left by
+	 * pre-extension-borrowing builds that are now shadowed by an extensionful
+	 * sibling. Without this the dead bare keys linger on disk forever (they are
+	 * never written again). Safe to call on every boot — a no-op once the file
+	 * is clean, and it never touches a bare key that lacks a sibling.
+	 */
+	public pruneStaleMediaInfoKeys = async (): Promise<void> => {
+		const mediaInfoObject = await this.getOrCreateMediaInfoFile([]);
+		const removed = pruneShadowedMediaInfoKeys(mediaInfoObject);
+		if (removed.length > 0) {
+			debug('Pruned %d stale extensionless mediaInfo keys: %O', removed.length, removed);
+			await this.writeMediaInfoFile(mediaInfoObject);
+		}
+	};
+
+	// Batch update methods for atomic mediaInfoObject updates
+	public startBatch = (): void => {
+		debug('Starting batch collection for mediaInfoObject updates');
+		this.batchUpdates.clear();
+		this.pendingWasUpdated.clear();
+	};
+
+	public collectUpdate = (fileName: string, value: string | number): void => {
+		debug('Collecting batch update for file: %s with value: %s', fileName, value);
+		this.batchUpdates.set(fileName, value);
+	};
+
+	public commitBatch = async (filesList: MergedDownloadList[]): Promise<void> => {
+		if (this.batchUpdates.size === 0 && this.tempDownloads.size === 0
+			&& this.pendingWasUpdated.size === 0) {
+			debug('No batch updates, temp downloads, or pending wasUpdated to commit');
+			return;
+		}
+
+		debug(
+			'Committing %d batch updates, %d temp downloads, %d pending wasUpdated',
+			this.batchUpdates.size, this.tempDownloads.size, this.pendingWasUpdated.size,
+		);
+
+		// ── Phase A: Pre-resolve new localUri for temp files (async I/O) ──
+		const tempUriMap = new Map<string, string>(); // fileName → temp localUri
+		for (const [fileName, tempPath] of this.tempDownloads) {
+			try {
+				const fileDetails = await this.getFileByPath(tempPath);
+				if (fileDetails) {
+					tempUriMap.set(fileName, fileDetails.localUri);
+				}
+			} catch (err) {
+				debug('commitBatch: Failed to resolve temp URI for %s: %O', fileName, err);
+			}
+		}
+
+		// Read current mediaInfoObject from disk
+		const mediaInfoObject = await this.getOrCreateMediaInfoFile(filesList);
+
+		// Save pre-update state so migration can compare old vs new for movement detection
+		const preUpdateMediaInfo = { ...mediaInfoObject };
+
+		// ── Phase B: SYNCHRONOUS STATE SWAP (no await = no interleaving) ──
+
+		// Apply batchUpdates to mediaInfoObject (in-memory)
+		for (const [fileName, value] of this.batchUpdates) {
+			const oldValue = mediaInfoObject[fileName];
+			mediaInfoObject[fileName] = value;
+			debug('Batch update: mediaInfoObject[%s] from %s to %s', fileName, oldValue, value);
+		}
+
+		// Swap localFilePath to temp URIs so playlist reads NEW content immediately
+		for (const file of filesList) {
+			if ('src' in file && 'localFilePath' in file) {
+				const fileName = getCanonicalFileName(file.src, mediaInfoObject);
+				const tempUri = tempUriMap.get(fileName);
+				if (tempUri) {
+					file.localFilePath = tempUri;
+					debug('commitBatch: Swapped localFilePath for %s to temp URI: %s', fileName, tempUri);
+				}
+			}
+		}
+
+		// Set wasUpdated for all pending files
+		for (const file of this.pendingWasUpdated) {
+			if ('localFilePath' in file) {
+				(file as any).wasUpdated = true;
+			}
+		}
+
+		// Safety net: any file whose mediaInfoObject entry changed in this batch but is NOT
+		// in pendingWasUpdated had a mapping-only update (e.g. same content, different query
+		// params). Flag it so playlistProcessor refreshes useInReportUrl on next play without
+		// triggering a full video re-prepare.
+		for (const file of filesList) {
+			if ('src' in file && 'localFilePath' in file) {
+				const fileName = getCanonicalFileName(file.src, mediaInfoObject);
+				if (this.batchUpdates.has(fileName) && !this.pendingWasUpdated.has(file)) {
+					(file as any).useInReportUrlStale = true;
+				}
+			}
+		}
+
+		this.pendingWasUpdated.clear();
+
+		// NOTE: useInReportUrl is NOT set here. In-flight elements (currently playing or
+		// already prepared) must keep their OLD useInReportUrl until they finish, so that
+		// sendMediaReport matches the content that actually played. useInReportUrl is
+		// refreshed in playElement when wasUpdated=true or useInReportUrlStale=true triggers
+		// a re-read from mediaInfoObject.
+
+		// ── End synchronous block ──
+
+		// ── Phase C: Persist and migrate (async, state already consistent) ──
+		await this.writeMediaInfoFile(mediaInfoObject);
+
+		// Migrate temp → standard (file copy + cleanup)
+		// State already points to temp/new content, so playlist is consistent
+		const failedFiles = await this.migrateFromTempToStandard(filesList, preUpdateMediaInfo);
+
+		// Log failed files (mediaInfoObject already written with new values;
+		// migration failure means file is still at temp path which localFilePath already points to)
+		for (const failedFile of failedFiles) {
+			debug('commitBatch: Migration failed for %s, temp URI still valid', failedFile);
+		}
+
+		debug('Batch updates committed and mediaInfoObject saved');
+
+		// Clear batch after successful commit
+		this.batchUpdates.clear();
+		// tempDownloads already cleared in migrateFromTempToStandard
+	};
+
+	/**
+	 * Process and batch download new content updates
+	 * Groups detections by localFilePath and fetchStrategy, then downloads in batches
+	 * Used by resource checker for optimized batch downloading
+	 * @param detections Array of update detections that need downloads
+	 * @param allFilesList
+	 */
+	public processNewContentUpdates = async (
+		detections: UpdateDetection[],
+		allFilesList?: MergedDownloadList[],
+	): Promise<ProcessedFileUpdate[]> => {
+		if (detections.length === 0) {
+			return [];
+		}
+
+		const maxContentLength = Math.max(...detections.map((d) => d.contentLength || 0));
+		const requiredSpace = maxContentLength || MINIMAL_STORAGE_FREE_SPACE;
+		if (!(await this.checkAvailableSpace(requiredSpace))) {
+			debug('processNewContentUpdates: Skipping %d downloads - insufficient storage space', detections.length);
+			return [];
+		}
+
+		const processedResults: ProcessedFileUpdate[] = [];
+
+		debug('processNewContentUpdates: Processing %d new content detections', detections.length);
+
+		// Build complete pending updates map for ALL files in this batch
+		// This is critical for preservation checks to see the future state of ALL files across all phases
+		const allPendingUpdates = new Map<string, string | number>();
+		for (const detection of detections) {
+			// Canonical key (with extension when applicable) so this map stays consistent
+			// with the post-commit mediaInfoObject keys.
+			const fileName = getFileName(detection.file.src, detection.updateValue as string | undefined);
+			allPendingUpdates.set(fileName, detection.updateValue);
+		}
+		debug('processNewContentUpdates: Built pending updates map with %d entries', allPendingUpdates.size);
+
+		// Group by updateValue (content URL) and localFilePath
+		// Only files needing the same content in the same folder are batched together
+		const groups = new Map<string, UpdateDetection[]>();
+
+		for (const detection of detections) {
+			// Strip query params for grouping - same content with different query params should be grouped together
+			const key = `${getUrlWithoutQueryParams(detection.updateValue)}|${detection.localFilePath}`;
+			if (!groups.has(key)) {
+				groups.set(key, []);
+			}
+			groups.get(key)!.push(detection);
+		}
+
+		debug('processNewContentUpdates: Grouped into %d batches', groups.size);
+
+		// Batch download each group
+		for (const [key, groupDetections] of groups) {
+			const files = groupDetections.map((d) => d.file);
+			const fetchStrategy = groupDetections[0].fetchStrategy;
+			const localFilePath = groupDetections[0].localFilePath;
+
+			debug(
+				'processNewContentUpdates: Batch downloading %d files for %s with strategy %s',
+				files.length,
+				localFilePath,
+				fetchStrategy.strategyType,
+			);
+
+			try {
+				// Use existing parallelDownloadAllFiles with multiple files
+				// Existing deduplication logic (Phase 3b/3c) will handle duplicate content
+				// Use the actual needsDownload value from detection (not hardcoded true)
+				// This ensures MOVED_CONTENT (needsDownload=false) doesn't trigger downloads
+				// Pass allFilesList for preservation check, or fall back to current batch files
+				// Skip HEAD requests since detection already done - avoid duplicate requests
+				const result = await this.parallelDownloadAllFiles(
+					files,
+					localFilePath,
+					SMILScheduleEnum.fileCheckTimeout,
+					[],
+					[],
+					fetchStrategy,
+					groupDetections[0].needsDownload, // Use actual needsDownload value from detection
+					String(groupDetections[0].updateValue),
+					allFilesList, // Pass full files list for accurate preservation check
+					allPendingUpdates, // Pass complete pending updates across all phases
+					true, // skipUpdateCheck: detection already done, avoid duplicate HEAD request
+					groupDetections[0].contentLength, // Content-Length from HEAD response
+				);
+
+				// Wait for all downloads to complete
+				await Promise.all(result.promises);
+
+				debug('processNewContentUpdates: Downloads complete for group: %s', key);
+
+				// Post-process: collectUpdate and set wasUpdated for each file
+				for (const detection of groupDetections) {
+					const fileName = getFileName(detection.file.src, detection.updateValue as string | undefined);
+					const downloadSucceeded = result.filesToUpdate.has(fileName);
+
+					// Always use detection's own updateValue — it has the correct per-file
+					// redirect URL with unique query params (e.g., ?id=...).
+					// result.filesToUpdate may have a shared latestRemoteValue from the
+					// skipUpdateCheck optimization, which is wrong for groups with
+					// multiple files pointing to the same content.
+					if (downloadSucceeded || !detection.needsDownload) {
+						debug(
+							'processNewContentUpdates: Collecting batch update for %s with value: %s',
+							fileName,
+							detection.updateValue,
+						);
+						this.collectUpdate(fileName, String(detection.updateValue));
+					} else {
+						// NEW_CONTENT but not in filesToUpdate — download/copy failed
+						debug(
+							'processNewContentUpdates: Skipping failed download for %s',
+							fileName,
+						);
+					}
+
+					let needsWasUpdated = detection.needsDownload && downloadSucceeded
+						&& 'localFilePath' in detection.file;
+
+					// For MOVED_CONTENT (needsDownload=false), update localFilePath to point
+					// to the already-cached file and set wasUpdated if the path changed.
+					// Without this, a looping video whose content moved to an already-cached
+					// URL would never re-prepare because wasUpdated stays false.
+					let mappingOnlyUpdate = false;
+					if (!detection.needsDownload && 'localFilePath' in detection.file) {
+						const pathChanged = await this.updateLocalFilePathForMovedContent(
+							detection.file,
+							detection.updateValue,
+							detection.mediaInfoObject,
+							detection.localFilePath,
+						);
+						if (pathChanged) {
+							needsWasUpdated = true;
+						} else {
+							mappingOnlyUpdate = true;
+						}
+					}
+
+					if (needsWasUpdated) {
+						this.pendingWasUpdated.add(detection.file);
+					} else if (mappingOnlyUpdate) {
+						// Bytes on disk didn't change but mediaInfoObject did. Flag the media so
+						// playlistProcessor refreshes useInReportUrl on next play without triggering
+						// a full video re-prepare (which would produce an invalid file://?__smil_version
+						// URI on Tizen).
+						(detection.file as any).useInReportUrlStale = true;
+					}
+
+					// Collect per-file result so callers (e.g. prePlayCheck) can use returned
+					// data instead of reading from shared Maps.
+					processedResults.push({
+						fileName,
+						tempPath: this.tempDownloads.get(fileName),
+						updateValue: (downloadSucceeded || !detection.needsDownload)
+							? String(detection.updateValue) : undefined,
+						needsWasUpdated,
+					});
+				}
+
+				debug('processNewContentUpdates: Batch processing complete for group: %s', key);
+			} catch (err) {
+				debug('processNewContentUpdates: Error processing batch for group %s: %O', key, err);
+				// Continue with other groups even if one fails
+			}
+		}
+
+		debug('processNewContentUpdates: All batches processed');
+		return processedResults;
+	};
+
+	/**
+	 * Handle moved content without downloading
+	 * Updates file mappings when content has moved to a new URL
+	 * Used by resource checker for files that don't need download
+	 * @param detection Update detection for moved content
+	 */
+	public handleMovedContent = async (detection: UpdateDetection): Promise<void> => {
+		debug('handleMovedContent: Handling moved content (no download needed): %s', detection.file.src);
+
+		await this.updateLocalFilePathForMovedContent(
+			detection.file,
+			detection.updateValue,
+			detection.mediaInfoObject,
+			detection.localFilePath,
+		);
+
+		// Update mapping in mediaInfoObject
+		const fileName = getFileName(detection.file.src, detection.updateValue as string | undefined);
+		debug('handleMovedContent: Collecting update for moved content: %s -> %s', fileName, detection.updateValue);
+		this.collectUpdate(fileName, String(detection.updateValue));
+	};
+
+	/**
+	 * Playability gate: HEAD media.playCheckUrl and decide play/skip for THIS pass only.
+	 * Returns true = skip playback this pass, false = play.
+	 * Pure gate — never touches media.expr, mediaInfoObject, or downloads; fail-open on any
+	 * transport error (network/timeout/CORS) so cached content keeps playing through outages.
+	 * Inert (always false) until <meta skipPlaybackOnHttpStatus="..."> is configured.
+	 */
+	public playCheckGate = async (
+		media: SMILVideo | SMILImage | SMILWidget | SMILAudio | SMILTicker,
+		smilObject: SMILFileObject,
+	): Promise<boolean> => {
+		if (!media.playCheckUrl) {
+			return false;
+		}
+
+		if (!smilObject.skipPlaybackOnHttpStatus || smilObject.skipPlaybackOnHttpStatus.length === 0) {
+			if (!this.playCheckGateMissingMetaWarned) {
+				this.playCheckGateMissingMetaWarned = true;
+				debug(
+					'playCheckGate: playCheckUrl present but skipPlaybackOnHttpStatus meta is not configured - gate inactive: %s',
+					media.playCheckUrl,
+				);
+			}
+			return false;
+		}
+
+		try {
+			const gateUrl = createDownloadPath(media.playCheckUrl);
+			const authHeaders = window.getAuthHeaders?.(gateUrl);
+			const response = await this.makeXhrRequest('HEAD', gateUrl, smilObject.refresh.timeOut, authHeaders);
+			const shouldSkip = shouldGateSkipForStatus(response.status, smilObject.skipPlaybackOnHttpStatus);
+			debug(
+				'playCheckGate: url=%s, status=%d, skipPlayback=%s',
+				media.playCheckUrl,
+				response.status,
+				shouldSkip,
+			);
+			return shouldSkip;
+		} catch (err) {
+			// fail-open: network error / timeout / CORS failure => play from cache
+			debug('playCheckGate: request failed, playing from cache (fail-open): url=%s, error=%O', media.playCheckUrl, err);
+			return false;
+		}
+	};
+
+	public prePlayCheck = async (
+		media: SMILVideo | SMILImage | SMILWidget | SMILAudio,
+		mediaFolder: string,
+		smilObject: SMILFileObject,
+		allMediaList: MergedDownloadList[],
+	): Promise<void> => {
+		try {
+			debug('prePlayCheck: Checking %s in folder %s', media.src, mediaFolder);
+			const fetchStrategy = getStrategy(smilObject.updateMechanism);
+
+			// Phase 1: Detection (HEAD request) — runs concurrently across regions.
+			const detection = await this.detectUpdateOnly(
+				media, mediaFolder,
+				smilObject.refresh.timeOut,
+				smilObject.skipContentOnHttpStatus,
+				smilObject.updateContentOnHttpStatus,
+				fetchStrategy,
+			);
+
+			if (!detection) {
+				debug('prePlayCheck: No update detected for %s', media.src);
+				return;
+			}
+
+			// Check if a background download is already in progress for this file.
+			// Use the canonical name so the key matches what processNewContentUpdates
+			// and the maps (tempDownloads, batchUpdates) use.
+			const fileName = getFileName(media.src, detection.updateValue as string | undefined);
+			if (this.activePrePlayDownloads.has(fileName)) {
+				debug('prePlayCheck: Download already in progress for %s, skipping', fileName);
+				return;
+			}
+
+			// Fire-and-forget: download and commit in the background so playback is not blocked.
+			// NOTE: Because this is not awaited by the caller (runPrePlayCheck), the updated content
+			// will not be available until the next playlist iteration. This is intentional — blocking
+			// playback on large downloads would cause visible stalls.
+			debug('prePlayCheck: Starting background download for %s', fileName);
+			const backgroundDownload = (async () => {
+				try {
+					// Phase 2: Download — returns per-file results so we don't need to read
+					// from shared Maps (batchUpdates, tempDownloads, pendingWasUpdated).
+					const results = await this.processNewContentUpdates([detection], allMediaList);
+					const fileResult = results.find((r) => r.fileName === fileName);
+
+					// Phase 3: Clean up shared Maps to prevent stale data accumulation.
+					// processNewContentUpdates also writes to these Maps for commitBatch callers,
+					// but prePlayCheck handles its own commit below.
+					this.tempDownloads.delete(fileName);
+					this.batchUpdates.delete(fileName);
+					this.pendingWasUpdated.delete(media as MergedDownloadList);
+
+					const ourTempPath = fileResult?.tempPath;
+					const ourBatchValue = fileResult?.updateValue;
+					const hadPendingUpdate = fileResult?.needsWasUpdated ?? false;
+
+					// Phase 4: Commit — serialized via prePlayLock (promise-chain mutex).
+					const commit = this.prePlayLock.then(async () => {
+						const mediaInfoObject = await this.getOrCreateMediaInfoFile(allMediaList);
+
+						// Step 4a: Migrate our single temp file to the standard folder.
+						if (ourTempPath) {
+							const standardPath = ourTempPath
+								.replace(FileStructure.videosTmp, FileStructure.videos)
+								.replace(FileStructure.imagesTmp, FileStructure.images)
+								.replace(FileStructure.audiosTmp, FileStructure.audios)
+								.replace(FileStructure.widgetsTmp, FileStructure.widgets);
+							const overwrittenSize = await this.getExistingFileSize(standardPath);
+							await this.sos.fileSystem.copyFile(
+								{ storageUnit: this.internalStorageUnit, filePath: ourTempPath },
+								{ storageUnit: this.internalStorageUnit, filePath: standardPath },
+								{ overwrite: true },
+							);
+							await this.sos.fileSystem.deleteFile(
+								{ storageUnit: this.internalStorageUnit, filePath: ourTempPath },
+								true,
+							);
+							this.reclaimOverwrittenSpace(overwrittenSize, standardPath);
+							debug('prePlayCheck: Migrated temp file to standard folder for %s', fileName);
+						}
+
+						// Step 4b: Resolve localFilePath from the slot's own file.
+						// For NEW_CONTENT, the file was just migrated by step 4a.
+						// For MOVED_CONTENT, the file was copied by updateLocalFilePathForMovedContent.
+						if ('localFilePath' in media) {
+							const knownPath = `${mediaFolder}/${fileName}`;
+							const fileDetails = await this.getFileByPath(knownPath);
+							if (fileDetails) {
+								media.localFilePath = fileDetails.localUri;
+								debug('prePlayCheck: Updated localFilePath for %s to %s', fileName, fileDetails.localUri);
+							}
+						}
+
+						// Step 4c: Persist the update in mediaInfoObject.
+						if (ourBatchValue !== undefined) {
+							mediaInfoObject[fileName] = ourBatchValue;
+						}
+						await this.writeMediaInfoFile(mediaInfoObject);
+
+						// Step 4d: Set wasUpdated and useInReportUrl AFTER migration is complete.
+						// This ensures the playlist only sees the update when the file content is ready.
+						if (hadPendingUpdate && 'localFilePath' in media) {
+							(media as any).wasUpdated = true;
+							debug('prePlayCheck: Set wasUpdated=true for %s after migration', fileName);
+						}
+						if (ourBatchValue !== undefined && 'useInReportUrl' in media) {
+							media.useInReportUrl = String(ourBatchValue);
+							debug('prePlayCheck: Set useInReportUrl for %s to %s', fileName, ourBatchValue);
+						}
+
+						debug('prePlayCheck: Commit complete for %s', fileName);
+					});
+					this.prePlayLock = commit.catch(() => {/* errors surface via the awaited commit below */});
+					await commit;
+				} catch (error) {
+					debug('Background prePlayCheck download failed for %s: %O', media.src, error);
+				} finally {
+					this.activePrePlayDownloads.delete(fileName);
+				}
+			})();
+
+			this.activePrePlayDownloads.set(fileName, backgroundDownload);
+		} catch (error) {
+			debug('Pre-play check failed for %s, using cached version: %O', media.src, error);
+		}
+	};
+
+	private getFileByPath = async (filePath: string): Promise<IFile | null> => {
+		return this.sos.fileSystem.getFile({
+			storageUnit: this.internalStorageUnit,
+			filePath,
+		});
+	};
+
+	private isValueAlreadyStored = (value: string | null, mediaInfoObject: MediaInfoObject): boolean => {
+		if (!value) {
+			return false;
+		}
+		// Compare without query params - same content with different query params should be considered stored
+		const valueNoQuery = getUrlWithoutQueryParams(value);
+		return Object.values(mediaInfoObject).some(
+			(storedValue) => storedValue && getUrlWithoutQueryParams(storedValue) === valueNoQuery,
+		);
+	};
+
+	/**
+	 * Get the temp folder path for a given standard folder path
+	 */
+	private getTempFolder = (standardFolder: string): string => {
+		switch (standardFolder) {
+			case FileStructure.videos:
+				return FileStructure.videosTmp;
+			case FileStructure.images:
+				return FileStructure.imagesTmp;
+			case FileStructure.audios:
+				return FileStructure.audiosTmp;
+			case FileStructure.widgets:
+				return FileStructure.widgetsTmp;
+			default:
+				debug('No temp folder defined for: %s, using standard folder', standardFolder);
+				return standardFolder;
+		}
+	};
+
+	/**
+	 * Clear temp downloads tracking
+	 */
+	private clearTempDownloads = (): void => {
+		debug('Clearing temp downloads tracking. Previous count: %d', this.tempDownloads.size);
+		this.tempDownloads.clear();
+	};
+
+	/**
+	 * Determine the full file path for a given filename by searching in all media folders
+	 * @param fileName - The filename to search for (e.g., "video_hash123.mp4")
+	 * @returns The full file path if found, null otherwise
+	 */
+	private determineFilePath = async (fileName: string): Promise<string | null> => {
+		const folders = [FileStructure.videos, FileStructure.images, FileStructure.audios, FileStructure.widgets];
+
+		for (const folder of folders) {
+			const filePath = `${folder}/${fileName}`;
+			try {
+				if (await this.fileExists(filePath)) {
+					debug('Found file %s at path: %s', fileName, filePath);
+					return filePath;
+				}
+			} catch (err) {
+				debug('Error checking file existence at %s: %O', filePath, err);
+			}
+		}
+
+		debug('File %s not found in any media folder', fileName);
+		return null;
+	};
+
+	/**
+	 * Check if there's enough available storage space for operations.
+	 *
+	 * Enforces an absolute floor of {@link MINIMAL_STORAGE_FREE_SPACE} bytes —
+	 * the operation is allowed only if `availableSpace - requiredWithMargin`
+	 * remains above the floor. This guarantees the device always retains at
+	 * least MINIMAL_STORAGE_FREE_SPACE free, no matter what.
+	 *
+	 * @param estimatedRequiredSpace - Estimated space needed in bytes (pass 0
+	 *   when only the floor matters, e.g. for size-agnostic guard checks).
+	 * @returns True if both the operation fits AND the floor is preserved.
+	 */
+	private checkAvailableSpace = async (estimatedRequiredSpace: number): Promise<boolean> => {
+		try {
+			const availableSpace = Math.max(this.estimatedFreeSpace, 0);
+
+			// Add safety margin - require at least 10% more space than estimated
+			const safetyMargin = 1.1;
+			const requiredWithMargin = estimatedRequiredSpace * safetyMargin;
+
+			// Absolute floor: after consuming requiredWithMargin, the device
+			// must still have MINIMAL_STORAGE_FREE_SPACE available.
+			const hasEnoughSpace =
+				availableSpace - requiredWithMargin >= MINIMAL_STORAGE_FREE_SPACE;
+
+			debug(
+				'Storage check: Available: %d MB, Required: %d MB (with margin: %d MB), Floor: %d MB, Sufficient: %s',
+				Math.round(availableSpace / (1024 * 1024)),
+				Math.round(estimatedRequiredSpace / (1024 * 1024)),
+				Math.round(requiredWithMargin / (1024 * 1024)),
+				Math.round(MINIMAL_STORAGE_FREE_SPACE / (1024 * 1024)),
+				hasEnoughSpace ? 'Yes' : 'No',
+			);
+
+			return hasEnoughSpace;
+		} catch (err) {
+			debug('Error checking available storage space: %O', err);
+			// If we can't check space, proceed anyway and handle errors later
+			return true;
+		}
+	};
+
+	/**
+	 * Floor-aware pre-check for an upcoming file COPY.
+	 *
+	 * Looks up the source file's real `sizeBytes`; falls back to `fallbackBytes`
+	 * (defaults to {@link MINIMAL_STORAGE_FREE_SPACE} — the most pessimistic
+	 * estimate) when the live size is unavailable. Forwards the resolved size
+	 * to {@link checkAvailableSpace}, which enforces the absolute minimum-free
+	 * floor.
+	 *
+	 * Use at every call site that copies new bytes onto disk. Callers handle
+	 * their own debug messaging and exit branch (continue / return /
+	 * fall-back) so the helper stays small and focused.
+	 *
+	 * @returns true if the copy would not breach the floor.
+	 */
+	private hasFloorRoomForCopy = async (
+		sourceFilePath: string,
+		fallbackBytes: number = MINIMAL_STORAGE_FREE_SPACE,
+	): Promise<boolean> => {
+		const stats = await this.getFileByPath(sourceFilePath);
+		return this.checkAvailableSpace(stats?.sizeBytes || fallbackBytes);
+	};
+
+	private trackSpaceConsumed = async (filePath: string) => {
+		try {
+			const fileInfo = await this.getFileByPath(filePath);
+			if (fileInfo?.sizeBytes && fileInfo.sizeBytes > 0) {
+				this.estimatedFreeSpace -= fileInfo.sizeBytes;
+				debug(
+					'Space consumed: %d MB for %s (estimated free: %d MB)',
+					Math.round(fileInfo.sizeBytes / (1024 * 1024)),
+					filePath,
+					Math.round(this.estimatedFreeSpace / (1024 * 1024)),
+				);
+			} else if (fileInfo && !this.sizeBytesUnavailableWarned) {
+				this.sizeBytesUnavailableWarned = true;
+				debug('WARNING: sizeBytes unavailable for %s — space tracking may be inaccurate', filePath);
+			}
+		} catch (_) {
+			// Best-effort tracking
+		}
+	};
+
+	/**
+	 * Get the size of an existing file before it gets overwritten by copyFile.
+	 * Must be called BEFORE the copyFile, since after the copy the old file is gone.
+	 */
+	private getExistingFileSize = async (filePath: string): Promise<number> => {
+		try {
+			const fileInfo = await this.getFileByPath(filePath);
+			return fileInfo?.sizeBytes || 0;
+		} catch (_) {
+			return 0;
+		}
+	};
+
+	/**
+	 * Reclaim space that was freed when an existing file was overwritten by copyFile.
+	 * Call after a successful copy with the size obtained from getExistingFileSize.
+	 */
+	private reclaimOverwrittenSpace = (freedBytes: number, filePath: string) => {
+		if (freedBytes > 0) {
+			this.estimatedFreeSpace += freedBytes;
+			debug(
+				'Space reclaimed from overwritten file: %d MB at %s (estimated free: %d MB)',
+				Math.round(freedBytes / (1024 * 1024)),
+				filePath,
+				Math.round(this.estimatedFreeSpace / (1024 * 1024)),
+			);
+		}
+	};
+
+	/**
+	 * Detect content movements between URLs by comparing current and merged states
+	 * @param filesList - List of files to check
+	 * @param currentMediaInfo - Current mediaInfoObject state (before updates)
+	 * @param mergedMediaInfo - Merged state including pending batch updates
+	 * @returns Map of content movements, keyed by content value
+	 */
+	private detectContentMovements = (
+		filesList: MergedDownloadList[],
+		currentMediaInfo: MediaInfoObject,
+		mergedMediaInfo: MediaInfoObject,
+	): Map<string, ContentMovement> => {
+		const movements = new Map<string, ContentMovement>();
+
+		debug('Detecting content movements for %d files', filesList.length);
+
+		// Check each file to see if its content has changed
+		for (const file of filesList) {
+			// Use the canonical key (with extension when applicable) so we find an
+			// existing entry committed under e.g. "content_<hash>.mp4".
+			const destFileName = getCanonicalFileName(file.src, mergedMediaInfo); // Get this URL's filename
+			const currentValue = currentMediaInfo[destFileName]; // What content this URL currently has
+			const newValue = mergedMediaInfo[destFileName]; // What content this URL will have
+
+			// Skip if no change or no new value
+			if (currentValue === newValue || !newValue) {
+				continue;
+			}
+
+			// Same base URL (only query params differ) is not a content movement — the bytes
+			// on disk are still the right content for this slot. Suppressing this prevents
+			// spurious temp-copy/overwrite cycles on duplicate-slot pairs when a CDN redirect
+			// changes a tracking query param (e.g. `pl=`) without swapping the underlying file.
+			if (
+				typeof currentValue === 'string' &&
+				typeof newValue === 'string' &&
+				getUrlWithoutQueryParams(currentValue) === getUrlWithoutQueryParams(newValue)
+			) {
+				continue;
+			}
+
+			debug('File %s: content changing from %s to %s', destFileName, currentValue || 'none', newValue);
+
+			// Find where this new content currently exists
+			// Simple approach: whoever has it now is the source
+			// Compare without query params - same content may have different campaign/media IDs
+			const newValueNoQuery = getUrlWithoutQueryParams(newValue);
+			for (const [sourceFileName, sourceValue] of Object.entries(currentMediaInfo)) {
+				if (sourceValue && getUrlWithoutQueryParams(sourceValue) === newValueNoQuery && sourceFileName !== destFileName) {
+					// Found: content is moving FROM sourceFileName TO destFileName
+					debug('Content %s is moving from %s to %s', newValue, sourceFileName, destFileName);
+
+					// Track this movement - use base URL without query params as key to group movements
+					const contentKey = newValueNoQuery;
+					if (!movements.has(contentKey)) {
+						movements.set(contentKey, {
+							sourceFileName,
+							destinationFileNames: new Set(),
+							contentValue: newValue,
+						});
+					}
+					movements.get(contentKey)!.destinationFileNames.add(destFileName);
+					break; // Found the source, no need to continue searching
+				}
+			}
+		}
+
+		// Log summary
+		for (const [value, movement] of movements) {
+			debug(
+				'Movement detected: Content %s from %s to %d destination(s): %s',
+				value,
+				movement.sourceFileName,
+				movement.destinationFileNames.size,
+				Array.from(movement.destinationFileNames).join(', '),
+			);
+		}
+
+		debug('Total content movements detected: %d', movements.size);
+		return movements;
+	};
+
+	/**
+	 * Copy content to new locations based on detected movements
+	 * Uses temp copies to preserve content during cascading movements
+	 * @param movements - Map of content movements to process
+	 * @param mediaInfoObject - Current media info for checking content values
+	 * @param filesList - List of files to check if content is still needed
+	 * @returns Object with successfulCopies count and Set of file names that failed to copy
+	 */
+	private copyContentToNewLocations = async (
+		movements: Map<string, ContentMovement>,
+		mediaInfoObject: MediaInfoObject,
+		filesList: MergedDownloadList[],
+	): Promise<{ successfulCopies: number; failedFileNames: Set<string> }> => {
+		let successfulCopies = 0;
+		let failedCopies = 0;
+		const failedFileNames = new Set<string>();
+
+		debug('Starting content copy operations for %d movements', movements.size);
+
+		// First, populate source file paths for all movements
+		for (const movement of movements.values()) {
+			const sourcePath = await this.determineFilePath(movement.sourceFileName);
+			if (!sourcePath) {
+				debug('WARNING: Source file %s not found, skipping movement', movement.sourceFileName);
+				// Track all destination files as failed since we can't copy without source
+				for (const destFileName of movement.destinationFileNames) {
+					failedFileNames.add(destFileName);
+					debug('Marking destination %s as failed due to missing source', destFileName);
+				}
+				continue;
+			}
+			movement.sourceFilePath = sourcePath;
+		}
+
+		// Estimate total space needed (rough estimate)
+		let estimatedSpace = 0;
+		for (const movement of movements.values()) {
+			if (!movement.sourceFilePath) {
+				continue;
+			}
+
+			try {
+				const fileInfo = await this.getFileByPath(movement.sourceFilePath);
+				if (fileInfo?.sizeBytes) {
+					// Space needed = file size * number of destinations + temp copies
+					estimatedSpace += fileInfo.sizeBytes * (movement.destinationFileNames.size + 1);
+				}
+			} catch (err) {
+				debug('Could not get file size for %s: %O', movement.sourceFilePath, err);
+			}
+		}
+
+		// Check available space if we have an estimate
+		if (estimatedSpace > 0) {
+			const hasSpace = await this.checkAvailableSpace(estimatedSpace);
+			if (!hasSpace) {
+				debug(
+					'WARNING: May not have enough space for all copies. Required: %d MB',
+					Math.round(estimatedSpace / (1024 * 1024)),
+				);
+				// Continue anyway - some copies might succeed
+			}
+		}
+
+		// Step 1: Copy all source files to temp locations to preserve them
+		const tempCopies = new Map<string, string>(); // Map from original path to temp path
+		debug('Creating temp copies to preserve source content...');
+
+		for (const [, movement] of movements) {
+			if (!movement.sourceFilePath) {
+				continue;
+			}
+
+			// Create temp path
+			const tempFileName = `temp_${Date.now()}_${movement.sourceFileName}`;
+			let tempFolder: string;
+
+			if (movement.sourceFilePath.includes(FileStructure.videos)) {
+				tempFolder = FileStructure.videosTmp;
+			} else if (movement.sourceFilePath.includes(FileStructure.images)) {
+				tempFolder = FileStructure.imagesTmp;
+			} else if (movement.sourceFilePath.includes(FileStructure.audios)) {
+				tempFolder = FileStructure.audiosTmp;
+			} else {
+				tempFolder = FileStructure.widgetsTmp;
+			}
+
+			const tempPath = `${tempFolder}/${tempFileName}`;
+
+			try {
+				// Floor guard: skip the temp copy if it would breach the minimum free space floor
+				if (!(await this.hasFloorRoomForCopy(movement.sourceFilePath))) {
+					debug('  Skipping temp copy for %s - would breach minimum free space floor', movement.sourceFileName);
+					// Fall back to using the original file directly (consistent with the catch path below)
+					tempCopies.set(movement.sourceFilePath, movement.sourceFilePath);
+					continue;
+				}
+
+				// Copy to temp location
+				debug('  Creating temp copy: %s -> %s', movement.sourceFilePath, tempPath);
+				await this.sos.fileSystem.copyFile(
+					{
+						storageUnit: this.internalStorageUnit,
+						filePath: movement.sourceFilePath,
+					},
+					{
+						storageUnit: this.internalStorageUnit,
+						filePath: tempPath,
+					},
+					{
+						overwrite: true,
+					},
+				);
+
+				await this.trackSpaceConsumed(tempPath);
+				tempCopies.set(movement.sourceFilePath, tempPath);
+				debug('  ✓ Created temp copy for %s', movement.sourceFileName);
+			} catch (err) {
+				debug('ERROR: Failed to create temp copy for %s: %O', movement.sourceFileName, err);
+				// Try to continue with original file
+				tempCopies.set(movement.sourceFilePath, movement.sourceFilePath);
+			}
+		}
+
+		// Step 2: Copy from temp locations to final destinations
+		debug('Copying from temp locations to final destinations...');
+
+		for (const [contentValue, movement] of movements) {
+			if (!movement.sourceFilePath) {
+				debug('Skipping movement for content %s - no source path', contentValue);
+				continue;
+			}
+
+			// Use temp copy if available, otherwise use original
+			const sourcePath = tempCopies.get(movement.sourceFilePath) || movement.sourceFilePath;
+
+			debug(
+				'Copying content %s from %s to %d destination(s)',
+				contentValue,
+				movement.sourceFileName,
+				movement.destinationFileNames.size,
+			);
+
+			// Copy to each destination
+			for (const destFileName of movement.destinationFileNames) {
+				// Determine destination folder based on file extension
+				const destPath = await this.determineFilePath(destFileName);
+				let destFolder: string;
+
+				// If file already exists, use its current folder
+				if (destPath) {
+					destFolder = destPath.substring(0, destPath.lastIndexOf('/'));
+				} else {
+					// Determine folder based on source path
+					if (movement.sourceFilePath.includes(FileStructure.videos)) {
+						destFolder = FileStructure.videos;
+					} else if (movement.sourceFilePath.includes(FileStructure.images)) {
+						destFolder = FileStructure.images;
+					} else if (movement.sourceFilePath.includes(FileStructure.audios)) {
+						destFolder = FileStructure.audios;
+					} else if (movement.sourceFilePath.includes(FileStructure.widgets)) {
+						destFolder = FileStructure.widgets;
+					} else {
+						debug('Could not determine destination folder for %s', destFileName);
+						failedCopies++;
+						failedFileNames.add(destFileName);
+						continue;
+					}
+				}
+
+				const finalDestPath = `${destFolder}/${destFileName}`;
+
+				// Before copying, preserve destination file if it exists and is not needed elsewhere
+				if (await this.fileExists(finalDestPath)) {
+					const destValue = mediaInfoObject[destFileName];
+					if (destValue) {
+						// Check if this content is still needed by other URLs after the movement
+						const stillNeeded = this.isContentNeededByOtherUrls(
+							destValue,
+							destFileName,
+							filesList,
+							mediaInfoObject,
+						);
+
+						if (!stillNeeded) {
+							debug(
+								'  Preserving destination content before overwrite: %s (value: %s)',
+								finalDestPath,
+								destValue,
+							);
+							const mediaType = mapFileType(destFolder);
+							await this.preserveFileToStorage(finalDestPath, destValue, mediaType);
+						} else {
+							debug('  Destination content still needed elsewhere, not preserving: %s', destValue);
+						}
+					}
+				}
+
+				try {
+					// Copy file from temp location (this will overwrite if destination exists)
+					debug('  Executing copy operation:');
+					debug('    Source: %s', sourcePath);
+					debug('    Destination: %s', finalDestPath);
+
+					const overwrittenSize = await this.getExistingFileSize(finalDestPath);
+					await this.sos.fileSystem.copyFile(
+						{
+							storageUnit: this.internalStorageUnit,
+							filePath: sourcePath,
+						},
+						{
+							storageUnit: this.internalStorageUnit,
+							filePath: finalDestPath,
+						},
+						{
+							overwrite: true,
+						},
+					);
+					this.reclaimOverwrittenSpace(overwrittenSize, finalDestPath);
+
+					await this.trackSpaceConsumed(finalDestPath);
+					successfulCopies++;
+					debug('  ✓ Successfully copied %s to %s', movement.sourceFileName, destFileName);
+				} catch (err) {
+					failedCopies++;
+					failedFileNames.add(destFileName);
+					debug('ERROR: Failed to copy %s to %s: %O', movement.sourceFileName, destFileName, err);
+					// Continue with other copies even if this one fails
+				}
+			}
+		}
+
+		// Step 3: Clean up temp copies
+		debug('Cleaning up temp copies...');
+		for (const [originalPath, tempPath] of tempCopies) {
+			if (tempPath !== originalPath) {
+				// Only delete if it's actually a temp copy
+				try {
+					await this.deleteFile(tempPath);
+					debug('  Deleted temp copy: %s', tempPath);
+				} catch (err) {
+					debug('  Warning: Could not delete temp copy %s: %O', tempPath, err);
+					// Non-critical, continue
+				}
+			}
+		}
+
+		debug('Content copy operations complete. Successful: %d, Failed: %d', successfulCopies, failedCopies);
+
+		return { successfulCopies, failedFileNames };
+	};
+
+	/**
+	 * Clear all temp folders by deleting their contents
+	 */
+	private clearTempFolders = async (): Promise<void> => {
+		const tempFolders = [
+			FileStructure.videosTmp,
+			FileStructure.imagesTmp,
+			FileStructure.audiosTmp,
+			FileStructure.widgetsTmp,
+		];
+
+		for (const folder of tempFolders) {
+			try {
+				const files = await this.sos.fileSystem.listFiles({
+					storageUnit: this.internalStorageUnit,
+					filePath: folder,
+				});
+
+				debug('Clearing %d files from temp folder: %s', files.length, folder);
+
+				for (const file of files) {
+					try {
+						await this.deleteFile(file.filePath);
+						debug('Deleted temp file: %s', file.filePath);
+					} catch (err) {
+						debug('Error deleting temp file %s: %O', file.filePath, err);
+					}
+				}
+			} catch (err) {
+				// Folder might not exist or be empty
+				debug('Error listing temp folder %s: %O', folder, err);
+			}
+		}
+	};
+
+	/**
+	 * Get the merged state including pending batch updates
+	 */
+	private getMergedMediaInfoState = (mediaInfoObject: MediaInfoObject): MediaInfoObject => {
+		// Create a copy of the current state
+		const mergedState = { ...mediaInfoObject };
+
+		// Apply pending batch updates
+		for (const [fileName, value] of this.batchUpdates) {
+			mergedState[fileName] = value;
+			debug('Applying pending update to merged state: %s = %s', fileName, value);
+		}
+
+		return mergedState;
+	};
+
+	/**
+	 * Migrate files from temp folders to standard folders
+	 * Integrates content movement detection and copying logic
+	 * @returns Set of file names that failed to migrate
+	 */
+	private migrateFromTempToStandard = async (
+		filesList: MergedDownloadList[],
+		mediaInfoObject: MediaInfoObject,
+	): Promise<Set<string>> => {
+		const failedFileNames = new Set<string>();
+		debug('Starting migration process. Temp downloads: %d', this.tempDownloads.size);
+
+		// Step 1: Detect content movements (including batch updates)
+		debug('\n=== STEP 1: DETECTING CONTENT MOVEMENTS ===');
+		const mergedState = this.getMergedMediaInfoState(mediaInfoObject);
+		debug('Merged state includes %d batch updates', this.batchUpdates.size);
+		const contentMovements = this.detectContentMovements(filesList, mediaInfoObject, mergedState);
+		debug('Detected %d content movements', contentMovements.size);
+		for (const [value, movement] of contentMovements) {
+			debug(
+				'  Movement: content %s from %s to %s',
+				value,
+				movement.sourceFileName,
+				Array.from(movement.destinationFileNames).join(', '),
+			);
+		}
+
+		// Step 2: Check available space for copies
+		const estimatedSpaceNeeded = contentMovements.size * 50 * 1024 * 1024; // Estimate 50MB per file
+		const hasSpace = await this.checkAvailableSpace(estimatedSpaceNeeded);
+
+		if (!hasSpace) {
+			debug('WARNING: Insufficient space for content copies. Proceeding with limited migration');
+		}
+
+		// Step 3: Perform content copies for moved content
+		debug('\n=== STEP 3: COPYING MOVED CONTENT ===');
+		if (contentMovements.size > 0 && hasSpace) {
+			debug('Starting copy operations for %d movements', contentMovements.size);
+			const copyResult = await this.copyContentToNewLocations(contentMovements, mediaInfoObject, filesList);
+			for (const fileName of copyResult.failedFileNames) {
+				failedFileNames.add(fileName);
+			}
+			debug('Content copy phase complete. Successful: %d, Failed: %d', copyResult.successfulCopies, copyResult.failedFileNames.size);
+		} else if (contentMovements.size > 0 && !hasSpace) {
+			// No space available - mark all destination files as failed
+			debug('No space for content copies - marking all destinations as failed');
+			for (const movement of contentMovements.values()) {
+				for (const destFileName of movement.destinationFileNames) {
+					failedFileNames.add(destFileName);
+					debug('Marking destination %s as failed due to insufficient space', destFileName);
+				}
+			}
+		} else {
+			debug('No content copies needed (movements: %d)', contentMovements.size);
+		}
+
+		// Step 4 (Pass 1): Copy temp downloads to standard locations.
+		// Deletion of the tmp source is deferred until AFTER Step 5 has updated
+		// every file.localFilePath to its standard-path URI. Otherwise a concurrent
+		// video.prepare() in the playlist could reference a tmp URI whose file was
+		// just deleted, producing PLAYER_ERROR_INVALID_URI on Tizen AVPlayer.
+		const tmpPathsToDelete: string[] = [];
+		debug('\n=== STEP 4: PROCESSING TEMP DOWNLOADS ===');
+		if (this.tempDownloads.size > 0) {
+			debug('Processing %d temp downloads:', this.tempDownloads.size);
+			for (const [fileName, tempPath] of this.tempDownloads) {
+				debug('  Temp file: %s at %s', fileName, tempPath);
+			}
+
+			// Pass 1: copy tmp → standard, collect tmp paths to delete later.
+			for (const [fileName, tempPath] of this.tempDownloads) {
+				// Determine the standard path from the temp path
+				const standardPath = tempPath
+					.replace(FileStructure.videosTmp, FileStructure.videos)
+					.replace(FileStructure.imagesTmp, FileStructure.images)
+					.replace(FileStructure.audiosTmp, FileStructure.audios)
+					.replace(FileStructure.widgetsTmp, FileStructure.widgets);
+
+				try {
+					debug('Copying file from %s to %s', tempPath, standardPath);
+					const overwrittenSize = await this.getExistingFileSize(standardPath);
+					await this.sos.fileSystem.copyFile(
+						{
+							storageUnit: this.internalStorageUnit,
+							filePath: tempPath,
+						},
+						{
+							storageUnit: this.internalStorageUnit,
+							filePath: standardPath,
+						},
+						{
+							overwrite: true,
+						},
+					);
+					this.reclaimOverwrittenSpace(overwrittenSize, standardPath);
+
+					// Defer tmp delete until after Step 5 updates localFilePath.
+					tmpPathsToDelete.push(tempPath);
+
+					debug('Successfully migrated: %s', fileName);
+				} catch (err) {
+					failedFileNames.add(fileName);
+					debug('Error migrating file %s: %O', fileName, err);
+					// Continue with other files even if one fails. The tmp file is
+					// NOT queued for deletion — the playlist can keep using it.
+				}
+			}
+
+			// Don't clear temp folders here — failed migrations leave temp files that
+			// localFilePath still points to. Startup clearTempFolders() handles cleanup.
+		}
+
+		// Step 5: Update localFilePath for all media items
+		// Note: We check tempDownloads before clearing it
+		debug('\n=== STEP 5: UPDATING LOCAL FILE PATHS ===');
+		debug('Processing %d files for localFilePath updates', filesList.length);
+
+		for (const file of filesList) {
+			debug('\n--- Processing file: %s ---', file.src);
+			if ('localFilePath' in file) {
+				const fileName = getCanonicalFileName(file.src, mediaInfoObject);
+				debug('  Generated fileName from URL: %s', fileName);
+				debug('  Current localFilePath: %s', file.localFilePath);
+
+				const actualPath = await this.determineFilePath(fileName);
+				debug('  Found file at path: %s', actualPath || 'NOT FOUND');
+
+				if (actualPath) {
+					try {
+						const fileDetails = await this.getFileByPath(actualPath);
+						if (fileDetails) {
+							const oldPath = file.localFilePath;
+							const newPath = fileDetails.localUri;
+
+							debug('  File details retrieved:');
+							debug('    - Old localFilePath: %s', oldPath);
+							debug('    - New localFilePath: %s', newPath);
+							debug('    - Path changed: %s', oldPath !== newPath);
+
+							file.localFilePath = newPath;
+						} else {
+							debug('  WARNING: No file details returned for path: %s', actualPath);
+						}
+					} catch (err) {
+						debug('  ERROR updating localFilePath for %s: %O', file.src, err);
+					}
+				} else {
+					debug('  WARNING: No file found for fileName: %s', fileName);
+					debug('  This file may not have been downloaded yet');
+				}
+			} else {
+				debug('  Skipping - file has no localFilePath property');
+			}
+		}
+
+		debug('\n=== END OF STEP 5 ===');
+
+		// Step 6 (Pass 2): now that every localFilePath references the standard
+		// path, it is safe to delete the tmp sources we copied in Step 4. Running
+		// this after Step 5 closes the race where video.prepare() could hit a
+		// just-deleted tmp URI.
+		if (tmpPathsToDelete.length > 0) {
+			debug('\n=== STEP 6: DELETING MIGRATED TEMP FILES ===');
+			debug('Deleting %d migrated temp files', tmpPathsToDelete.length);
+			for (const tempPath of tmpPathsToDelete) {
+				try {
+					await this.sos.fileSystem.deleteFile(
+						{
+							storageUnit: this.internalStorageUnit,
+							filePath: tempPath,
+						},
+						true,
+					);
+					debug('  Deleted temp file: %s', tempPath);
+				} catch (err) {
+					// Non-fatal: localFilePath already points at the standard copy.
+					// Orphan tmp files are reaped by clearTempFolders() on next boot.
+					debug('  Failed to delete temp file %s (non-fatal): %O', tempPath, err);
+				}
+			}
+		}
+
+		// Clear temp downloads tracking after migration
+		if (this.tempDownloads.size > 0) {
+			this.clearTempDownloads();
+		}
+
+		debug('Migration process completed. Failed migrations: %d', failedFileNames.size);
+		return failedFileNames;
+	};
+
+	private findActualFileForMovedContent = async (
+		currentValue: string | null,
+		mediaInfoObject: MediaInfoObject,
+		localFilePath: string,
+	): Promise<{ localUri: string; filePath: string } | null> => {
+		if (!currentValue) {
+			debug('findActualFileForMovedContent: No value provided, returning null');
+			return null;
+		}
+
+		debug('findActualFileForMovedContent: Looking for files with value: %s', currentValue);
+
+		// Find which file has this content (by matching the value, compare without query params)
+		const currentValueNoQuery = getUrlWithoutQueryParams(currentValue);
+		for (const [fileName, storedValue] of Object.entries(mediaInfoObject)) {
+			if (storedValue && getUrlWithoutQueryParams(storedValue) === currentValueNoQuery) {
+				debug('findActualFileForMovedContent: Found matching file: %s with value: %s', fileName, storedValue);
+				const filePath = `${localFilePath}/${fileName}`;
+
+				// Get the file details to get localUri
+				const fileDetails = await this.getFileByPath(filePath);
+
+				if (fileDetails) {
+					debug(
+						'findActualFileForMovedContent: File exists at %s, localUri: %s',
+						filePath,
+						fileDetails.localUri,
+					);
+					return { localUri: fileDetails.localUri, filePath };
+				} else {
+					debug('findActualFileForMovedContent: File not found at expected path: %s', filePath);
+				}
+			}
+		}
+
+		debug('findActualFileForMovedContent: No matching file found for value: %s', currentValue);
+		return null;
+	};
+
+	/**
+	 * Update file.localFilePath to point to where content actually exists
+	 * Shared helper for moved content handling across checkLastModified and handleMovedContent
+	 * @returns true if successfully updated, false otherwise
+	 */
+	private updateLocalFilePathForMovedContent = async (
+		file: MergedDownloadList,
+		updateValue: string | number,
+		mediaInfoObject: MediaInfoObject,
+		localFilePath: string,
+	): Promise<boolean> => {
+		if (!('localFilePath' in file)) {
+			return false;
+		}
+
+		const actualFile = await this.findActualFileForMovedContent(
+			String(updateValue),
+			mediaInfoObject,
+			localFilePath,
+		);
+
+		if (actualFile) {
+			// Copy the shared file to the slot's own path so it's self-contained.
+			// Use the resolved updateValue as fallback so we honor the extension
+			// (the slot copy must live under the same canonical name as the source).
+			const slotFileName = getFileName(file.src, updateValue as string | undefined);
+			const destPath = `${localFilePath}/${slotFileName}`;
+
+			let copyExecuted = false;
+			if (actualFile.filePath !== destPath) {
+				const overwrittenSize = await this.getExistingFileSize(destPath);
+				const sourceSize = (actualFile as { sizeBytes?: number }).sizeBytes || MINIMAL_STORAGE_FREE_SPACE;
+				// Net new bytes consumed = sourceSize − overwrittenSize. Use sourceSize as
+				// a conservative upper bound for the floor guard.
+				const netSize = Math.max(sourceSize - overwrittenSize, 0);
+				if (!(await this.checkAvailableSpace(netSize))) {
+					debug('Skipping MOVED_CONTENT slot copy for %s - would breach minimum free space floor', file.src);
+					return false;
+				}
+				await this.sos.fileSystem.copyFile(
+					{ storageUnit: this.internalStorageUnit, filePath: actualFile.filePath },
+					{ storageUnit: this.internalStorageUnit, filePath: destPath },
+					{ overwrite: true },
+				);
+				this.reclaimOverwrittenSpace(overwrittenSize, destPath);
+				await this.trackSpaceConsumed(destPath);
+				debug('Copied moved content from %s to %s for %s', actualFile.filePath, destPath, file.src);
+				copyExecuted = true;
+			}
+
+			// Resolve localFilePath from the slot's own file (now has correct content)
+			const slotFileDetails = await this.getFileByPath(destPath);
+			let localFilePathChanged = false;
+			if (slotFileDetails) {
+				const oldPath = file.localFilePath;
+				if (oldPath !== slotFileDetails.localUri) {
+					file.localFilePath = slotFileDetails.localUri;
+					debug('Updated localFilePath for %s from %s to %s', file.src, oldPath, slotFileDetails.localUri);
+					localFilePathChanged = true;
+				}
+			}
+
+			// Return true only when something actually changed on disk or in the path.
+			// No-op calls (matching slot found but same path and same localFilePath) must return
+			// false so callers don't mis-interpret mapping-only churn as a content update and
+			// trigger the wasUpdated/re-prepare pipeline.
+			return copyExecuted || localFilePathChanged;
+		}
+
+		return false;
+	};
+
+	/**
+	 * Find an existing file that contains specific content
+	 * Used to check if content already exists locally before downloading
+	 * @param contentValue - The content value (e.g., location URL) to search for
+	 * @param mediaInfoObject - The media info object containing file-value mappings
+	 * @returns The file path if found and exists, null otherwise
+	 */
+	private findExistingContentFile = async (
+		contentValue: string,
+		mediaInfoObject: MediaInfoObject,
+	): Promise<string | null> => {
+		debug('findExistingContentFile: Looking for existing content with value: %s', contentValue);
+
+		// Search for any file with this content value (compare without query params)
+		const contentValueNoQuery = getUrlWithoutQueryParams(contentValue);
+		for (const [fileName, storedValue] of Object.entries(mediaInfoObject)) {
+			if (storedValue && getUrlWithoutQueryParams(storedValue) === contentValueNoQuery) {
+				debug('findExistingContentFile: Found matching file: %s', fileName);
+
+				// Use existing method to determine file path
+				const filePath = await this.determineFilePath(fileName);
+
+				if (filePath && (await this.fileExists(filePath))) {
+					debug('findExistingContentFile: File exists at: %s', filePath);
+					return filePath;
+				} else {
+					debug('findExistingContentFile: File not found at expected path: %s', filePath);
+				}
+			}
+		}
+
+		debug('findExistingContentFile: No existing file found for content: %s', contentValue);
+		return null;
+	};
+
+	/**
+	 * Internal detection logic shared by checkLastModified and detectUpdateOnly
+	 * Extracts common detection pattern to avoid duplication
+	 * @returns Detection result with updateCheck, mediaInfoObject, and isNewContent flag, or null if skipped/error
+	 */
+	private detectFileUpdateInternal = async (
 		file: MergedDownloadList,
 		localFilePath: string,
 		timeOut: number,
-		skipContentHttpStatusCodes: number[] = [],
-		updateContentHttpStatusCodes: number[] = [],
+		skipContentHttpStatusCodes: number[],
+		updateContentHttpStatusCodes: number[],
 		fetchStrategy: FetchStrategy,
-	): Promise<Promise<void>[]> => {
-		// do not check streams for update
+	): Promise<{
+		updateCheck: UpdateCheckResult;
+		mediaInfoObject: MediaInfoObject;
+		isNewContent: boolean;
+	} | null> => {
+		// Skip streams
 		if (localFilePath === FileStructure.videos && !isNil((file as SMILVideo).isStream)) {
-			return [];
+			return null;
 		}
 
 		try {
@@ -785,46 +3207,258 @@ export class FilesManager implements IFilesManager {
 				fetchStrategy,
 			);
 
+			// Determine if new content (only matters if shouldUpdate=true)
+			const isNewContent =
+				updateCheck.shouldUpdate && updateCheck.value
+					? !this.isValueAlreadyStored(updateCheck.value, mediaInfoObject)
+					: false;
+
+			return {
+				updateCheck,
+				mediaInfoObject,
+				isNewContent,
+			};
+		} catch (err) {
+			debug('Error during update detection for %s: %O', file.src, err);
+			return null;
+		}
+	};
+
+	private checkLastModified = async (
+		file: MergedDownloadList,
+		localFilePath: string,
+		timeOut: number,
+		skipContentHttpStatusCodes: number[] = [],
+		updateContentHttpStatusCodes: number[] = [],
+		fetchStrategy: FetchStrategy,
+	): Promise<Promise<void>[]> => {
+		const detection = await this.detectFileUpdateInternal(
+			file,
+			localFilePath,
+			timeOut,
+			skipContentHttpStatusCodes,
+			updateContentHttpStatusCodes,
+			fetchStrategy,
+		);
+
+		if (!detection) {
+			return [];
+		}
+
+		const { updateCheck, mediaInfoObject, isNewContent } = detection;
+
+		try {
 			if (updateCheck.shouldUpdate) {
-				// when there is forceDownload true, we dont care about timeout so use default one
-				const result = await this.parallelDownloadAllFiles(
-					[file],
-					localFilePath,
-					SMILScheduleEnum.fileCheckTimeout,
-					[],
-					[],
-					fetchStrategy,
-					true,
+				if (isNewContent) {
+					debug('checkLastModified: New content detected for %s, downloading to temp folder', file.src);
+
+					// Download new content to temp folder
+					const result = await this.parallelDownloadAllFiles(
+						[file],
+						localFilePath,
+						SMILScheduleEnum.fileCheckTimeout,
+						[],
+						[],
+						fetchStrategy,
+						true,
+						updateCheck.value,
+					);
+
+					await Promise.all(result.promises);
+
+					// Collect updates for batch processing
+					result.filesToUpdate.forEach((value, fileName) => {
+						debug(`Collecting batch update for file: %s with value: %O`, fileName, value);
+						this.collectUpdate(fileName, String(value));
+					});
+
+					if ('localFilePath' in file) {
+						// Defer wasUpdated to commitBatch for consistency with batch flow
+						this.pendingWasUpdated.add(file as MergedDownloadList);
+					}
+
+					return result.promises;
+				} else {
+					debug('checkLastModified: Content already exists locally, skipping download for %s', file.src);
+
+					// Content exists but may have moved - update mapping without downloading
+					if (updateCheck.value) {
+						const fileName = getFileName(file.src, updateCheck.value as string | undefined);
+						this.collectUpdate(fileName, String(updateCheck.value));
+						await this.updateLocalFilePathForMovedContent(
+							file,
+							updateCheck.value,
+							mediaInfoObject,
+							localFilePath,
+						);
+					}
+
+					return [];
+				}
+			} else if (updateCheck.value && 'localFilePath' in file) {
+				// Content hasn't changed but may have moved
+				debug(
+					'checkLastModified: Content exists, no update needed. Value: %s for file: %s',
 					updateCheck.value,
+					file.src,
 				);
 
-				// Wait for the download to complete
-				await Promise.all(result.promises);
+				const updated = await this.updateLocalFilePathForMovedContent(
+					file,
+					updateCheck.value,
+					mediaInfoObject,
+					localFilePath,
+				);
 
-				// Update the mediaInfoObject after download completes
-				await this.updateMediaInfoAfterDownloads(mediaInfoObject, result.filesToUpdate);
-
-				// Update file metadata to ensure it's properly tracked
-				const filePath = `${localFilePath}/${getFileName(file.src)}`;
-				const fileDetails = await this.sos.fileSystem.getFile({
-					storageUnit: this.internalStorageUnit,
-					filePath: filePath,
-				});
-
-				// TODO: fix typing, change filepath only for media not for smil file itself
-				// mark file as updated to force reload in browser cache
-				if ('localFilePath' in file) {
-					file.localFilePath = fileDetails ? fileDetails.localUri : '';
-					file.wasUpdated = true;
+				const fileName = getFileName(file.src, updateCheck.value as string | undefined);
+				const oldValue = mediaInfoObject[fileName];
+				// Persist mapping whenever the tracked value actually differs so custom
+				// endpoint reports reflect the current CDN redirect target. Split the
+				// effect based on whether the local path/bytes changed: real content move
+				// → wasUpdated (forces re-prepare); mapping-only churn (e.g. query-param
+				// change) → useInReportUrlStale (refresh report URL only).
+				if (String(oldValue) !== String(updateCheck.value)) {
+					debug(
+						'checkLastModified: Collecting batch update for mediaInfoObject[%s] from %s to %s',
+						fileName,
+						oldValue,
+						updateCheck.value,
+					);
+					this.collectUpdate(fileName, updateCheck.value);
 				}
 
-				return result.promises;
+				if (updated) {
+					// Defer wasUpdated to commitBatch for consistency with batch flow
+					this.pendingWasUpdated.add(file as MergedDownloadList);
+					debug('checkLastModified: Batch update collected for moved content');
+				} else if (String(oldValue) !== String(updateCheck.value)) {
+					(file as any).useInReportUrlStale = true;
+					debug('checkLastModified: Mapping-only update; flagged useInReportUrlStale for %s', fileName);
+				}
+			} else {
+				debug('checkLastModified: No update needed for file: %s', file.src);
 			}
 		} catch (err) {
-			debug('Error occurred: %O during checking file version: %O', err, file);
+			debug('[files] version check error: %O, file: %O', err, file);
 		}
 
 		return [];
+	};
+
+	/**
+	 * Detect if a file needs update without downloading
+	 * Used for batch download optimization in resource checker
+	 * @returns UpdateDetection object if update needed, null otherwise
+	 */
+	private detectUpdateOnly = async (
+		file: MergedDownloadList,
+		localFilePath: string,
+		timeOut: number,
+		skipContentHttpStatusCodes: number[],
+		updateContentHttpStatusCodes: number[],
+		fetchStrategy: FetchStrategy,
+	): Promise<UpdateDetection | null> => {
+		const detection = await this.detectFileUpdateInternal(
+			file,
+			localFilePath,
+			timeOut,
+			skipContentHttpStatusCodes,
+			updateContentHttpStatusCodes,
+			fetchStrategy,
+		);
+
+		if (!detection || !detection.updateCheck.value) {
+			// When content transitions to skipContent (e.g., 404) but has existing content,
+			// preserve the file to storage before it becomes orphaned.
+			if (detection && file.expr === ConditionalExprFormat.skipContent
+				&& 'localFilePath' in file && file.localFilePath !== '') {
+				const fileName = getCanonicalFileName(file.src, detection.mediaInfoObject);
+				const contentValue = detection.mediaInfoObject[fileName];
+				if (contentValue) {
+					const fullPath = `${localFilePath}/${fileName}`;
+					const mediaType = mapFileType(localFilePath);
+					debug('detectUpdateOnly: Preserving skipped content to storage: %s', file.src);
+					await this.preserveFileToStorage(fullPath, contentValue, mediaType);
+				}
+			}
+			debug('detectUpdateOnly: No update found for %s', file.src);
+			return null;
+		}
+
+		// Check if this is MOVED_CONTENT scenario
+		// shouldUpdate: false but value provided means content exists locally
+		if (!detection.updateCheck.shouldUpdate && detection.updateCheck.value) {
+			const fileName = getFileName(file.src, detection.updateCheck.value as string | undefined);
+			const currentLocalValue = detection.mediaInfoObject[fileName];
+
+			// If file needs to point to different content (compare without query params)
+			if (getUrlWithoutQueryParams(currentLocalValue) !== getUrlWithoutQueryParams(detection.updateCheck.value)) {
+				debug(
+					'MOVED_CONTENT detected: %s needs to update from %s to %s',
+					file.src,
+					currentLocalValue,
+					detection.updateCheck.value,
+				);
+
+				return {
+					file,
+					localFilePath,
+					updateValue: detection.updateCheck.value,
+					needsDownload: false, // MOVED_CONTENT - copy only
+					mediaInfoObject: detection.mediaInfoObject,
+					fetchStrategy,
+					contentLength: detection.updateCheck.contentLength,
+				};
+			}
+
+			// Query params changed but base URL is the same — update mapping for reporting, no download needed
+			if (currentLocalValue !== detection.updateCheck.value) {
+				debug(
+					'QUERY_PARAMS_CHANGED detected: %s needs mapping update from %s to %s',
+					file.src,
+					currentLocalValue,
+					detection.updateCheck.value,
+				);
+
+				return {
+					file,
+					localFilePath,
+					updateValue: detection.updateCheck.value,
+					needsDownload: false,
+					mediaInfoObject: detection.mediaInfoObject,
+					fetchStrategy,
+					contentLength: detection.updateCheck.contentLength,
+				};
+			}
+
+			// Content mapping is already correct, no action needed
+			debug('detectUpdateOnly: Content already up-to-date for %s', file.src);
+			return null;
+		}
+
+		// Keep all URLs pointing to the same NEW content as NEW so they get processed
+		// together in Phase 3 where deduplication logic (Phase 3b/3c) handles them.
+		// Don't split NEW content across phases - that breaks deduplication.
+		// MOVED_CONTENT (needsDownload=false) should only be used when content already
+		// exists locally (handled by the shouldUpdate=false check above at line 2518-2545).
+		const needsDownload = detection.isNewContent;
+
+		debug(
+			'detectUpdateOnly: Update detected for %s - needsDownload: %s, value: %s',
+			file.src,
+			needsDownload,
+			detection.updateCheck.value,
+		);
+
+		return {
+			file,
+			localFilePath,
+			updateValue: detection.updateCheck.value,
+			needsDownload, // true = NEW_CONTENT, false = MOVED_CONTENT
+			mediaInfoObject: detection.mediaInfoObject,
+			fetchStrategy,
+			contentLength: detection.updateCheck.contentLength,
+		};
 	};
 
 	private convertToResourcesCheckerFormat = (
@@ -836,6 +3470,7 @@ export class FilesManager implements IFilesManager {
 		updateContentHttpStatusCodes: number[] = [],
 		fetchStrategy: FetchStrategy,
 		reloadPlayerOnUpdate: boolean = false,
+		detectFunction?: (resource: MergedDownloadList) => Promise<UpdateDetection | null>,
 	) => {
 		return resources.map((resource) => {
 			return this.convertToResourceCheckerFormat(
@@ -851,6 +3486,7 @@ export class FilesManager implements IFilesManager {
 					),
 				refreshInterval,
 				reloadPlayerOnUpdate,
+				detectFunction ? async () => detectFunction(resource) : undefined,
 			);
 		});
 	};
@@ -860,6 +3496,7 @@ export class FilesManager implements IFilesManager {
 		checkFunction: () => Promise<Promise<void>[]>,
 		defaultInterval: number,
 		reloadPlayerOnUpdate: boolean = false,
+		detectFunction?: () => Promise<UpdateDetection | null>,
 	): Resource => {
 		return {
 			url: resource.updateCheckUrl ?? resource.src,
@@ -867,12 +3504,18 @@ export class FilesManager implements IFilesManager {
 			checkFunction: async () => {
 				return checkFunction();
 			},
+			detectFunction: detectFunction
+				? async () => {
+					return detectFunction();
+				}
+				: undefined,
 			actionOnSuccess: async (data, stopChecker) => {
 				// checker function returns an array of promises, if the array is not empty, player is updating new version of content
 				if (data.length > 0 && reloadPlayerOnUpdate) {
 					await stopChecker();
 				}
 			},
+			mediaObject: resource, // Add the media object reference
 		};
 	};
 
@@ -921,15 +3564,76 @@ export class FilesManager implements IFilesManager {
 		});
 	}
 
-	private saveCustomEndpointInfo = async (customEndpointInfo: CustomEndpointReport) => {
-		if (this.internalStorageUnit.freeSpace <= MINIMAL_STORAGE_FREE_SPACE) {
-			debug(
-				'Not enough space on device to save custom endpoint report, free space: %s',
-				this.internalStorageUnit.freeSpace,
-			);
+	/**
+	 * Reads an offline report file and decides whether it should be uploaded now.
+	 * Returns null when the file is the active batch file still accumulating reports.
+	 * For files selected for upload, tracking is removed inside the lock so concurrent
+	 * saves roll over to a new file instead of appending to one about to be deleted.
+	 */
+	private collectReportsForUpload = async (filePath: string): Promise<CustomEndpointReport[] | null> => {
+		return this.runWithOfflineReportsLock(async () => {
+			const fileIndex = getOfflineReportFileIndex(filePath);
+			debug('[files] got offline report file index: %d', fileIndex);
+
+			const fileContent = await this.sos.fileSystem.readFile({
+				storageUnit: this.internalStorageUnit,
+				filePath,
+			});
+
+			// parseOfflineReportLines tolerates and logs corrupted lines internally,
+			// returning only the salvageable reports.
+			const reports = parseOfflineReportLines(fileContent, filePath);
+
+			if (
+				shouldSkipActiveReportFile(
+					this.offlineReportsInfoObject[fileIndex],
+					reports.length,
+					this.smilLogging.reportFileLimit,
+				)
+			) {
+				debug(
+					'[files] skipping active batch: fileIndex=%d, reports=%d/%d',
+					fileIndex,
+					reports.length,
+					this.smilLogging.reportFileLimit,
+				);
+				return null;
+			}
+
+			delete this.offlineReportsInfoObject[fileIndex];
+			return reports;
+		});
+	};
+
+	private runWithOfflineReportsLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+		const result = this.offlineReportsLock.then(fn);
+		this.offlineReportsLock = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	};
+
+	private saveCustomEndpointInfo = async (
+		customEndpointInfo: CustomEndpointReport,
+		savedReason: 'failure' | 'batch',
+	) => {
+		// Floor check only — refuse to write a report if doing so would push the
+		// device below MINIMAL_STORAGE_FREE_SPACE. Reports themselves are tiny
+		// (KB-range), so we don't need to budget per-report bytes; the floor is
+		// what matters.
+		if (!(await this.checkAvailableSpace(0))) {
+			debug('[files] not enough space on device to save custom endpoint report');
 			return;
 		}
 
+		await this.runWithOfflineReportsLock(() => this.writeCustomEndpointInfo(customEndpointInfo, savedReason));
+	};
+
+	private writeCustomEndpointInfo = async (
+		customEndpointInfo: CustomEndpointReport,
+		savedReason: 'failure' | 'batch',
+	) => {
 		let currentFileIndex: number;
 
 		// Check if this is the first save after restart (offlineReportsInfoObject is empty)
@@ -937,12 +3641,12 @@ export class FilesManager implements IFilesManager {
 			// First save after restart - find highest existing index and start fresh
 			const highestExistingIndex = await this.initializeOfflineReportsIndex();
 			currentFileIndex = highestExistingIndex + 1; // Start with new file to avoid appending
-			debug('First save after restart, starting with new file index: %d', currentFileIndex);
+			debug('[files] first save after restart: fileIndex=%d', currentFileIndex);
 		} else {
 			// Use the highest tracked index from current session
 			const trackedIndexes = Object.keys(this.offlineReportsInfoObject).map(k => parseInt(k, 10));
 			currentFileIndex = Math.max(...trackedIndexes);
-			debug('Using highest tracked index from current session: %d', currentFileIndex);
+			debug('[files] using tracked index: %d', currentFileIndex);
 		}
 
 		if (!this.offlineReportsInfoObject[currentFileIndex]) {
@@ -952,7 +3656,7 @@ export class FilesManager implements IFilesManager {
 		}
 		// -1 because its indexed from 0
 		if (this.offlineReportsInfoObject[currentFileIndex].numberOfReports > this.smilLogging.reportFileLimit - 1) {
-			debug('File number of records exceeded ', currentFileIndex);
+			debug('[files] record limit exceeded: index=%d', currentFileIndex);
 			currentFileIndex += 1;
 			this.offlineReportsInfoObject[currentFileIndex] = {
 				numberOfReports: 0,
@@ -960,7 +3664,7 @@ export class FilesManager implements IFilesManager {
 		}
 
 		if (await this.fileExists(`${FileStructure.offlineReports}/offlineReports${currentFileIndex}.csv`)) {
-			debug('appending to a file ', `${FileStructure.offlineReports}/offlineReports${currentFileIndex}.csv`);
+			debug('[files] appending to file: %s', `${FileStructure.offlineReports}/offlineReports${currentFileIndex}.csv`);
 			await this.sos.fileSystem.appendFile(
 				{
 					storageUnit: this.internalStorageUnit,
@@ -970,7 +3674,7 @@ export class FilesManager implements IFilesManager {
 			);
 			this.offlineReportsInfoObject[currentFileIndex].numberOfReports += 1;
 		} else {
-			debug('creating new file ', `${FileStructure.offlineReports}/offlineReports${currentFileIndex}.csv`);
+			debug('[files] creating new file: %s', `${FileStructure.offlineReports}/offlineReports${currentFileIndex}.csv`);
 			await this.sos.fileSystem.writeFile(
 				{
 					storageUnit: this.internalStorageUnit,
@@ -979,6 +3683,12 @@ export class FilesManager implements IFilesManager {
 				`${JSON.stringify(customEndpointInfo)}\n`,
 			);
 			this.offlineReportsInfoObject[currentFileIndex].numberOfReports = 1;
+		}
+
+		// A failure-saved realtime report makes the whole file eligible for the
+		// watcher's next upload pass — only pure batch files keep accumulating.
+		if (savedReason === 'failure') {
+			this.offlineReportsInfoObject[currentFileIndex].hasFailureReports = true;
 		}
 	};
 
@@ -995,7 +3705,7 @@ export class FilesManager implements IFilesManager {
 			});
 
 			if (reportFiles.length === 0) {
-				debug('No existing offline report files found');
+				debug('[files] no offline report files found');
 				return -1; // Will start from index 0
 			}
 
@@ -1006,16 +3716,16 @@ export class FilesManager implements IFilesManager {
 			}).filter(index => index >= 0);
 
 			if (indexes.length === 0) {
-				debug('No valid offline report indexes found');
+				debug('[files] no valid offline report indexes found');
 				return -1;
 			}
 
 			const highestIndex = Math.max(...indexes);
-			debug('Found highest offline report index: %d from %d files', highestIndex, reportFiles.length);
+			debug('[files] found highest report index: %d from %d files', highestIndex, reportFiles.length);
 
 			return highestIndex;
 		} catch (error) {
-			debug('Error finding offline report index: %O', error);
+			debug('[files] error finding report index: %O', error);
 			return -1; // Safe fallback to start from 0
 		}
 	};
@@ -1025,9 +3735,9 @@ export class FilesManager implements IFilesManager {
 			try {
 				if (isUrl(widgets[i].src) && isWidgetUrl(widgets[i].src)) {
 					debug(
-						`Extracting widget: %O to destination path: %O`,
+						'[files] extracting widget: %O to destination path: %s',
 						widgets[i],
-						`${FileStructure.extracted}	${getFileName(widgets[i].src)}`,
+						`${FileStructure.extracted}/${getFileName(widgets[i].src)}`,
 					);
 					await this.sos.fileSystem.extractFile(
 						{
@@ -1042,7 +3752,7 @@ export class FilesManager implements IFilesManager {
 					);
 				}
 			} catch (err) {
-				debug(`Unexpected error: %O occurred during widget extract: %O`, err, widgets[i]);
+				debug('[files] widget extract error: %O, widget: %O', err, widgets[i]);
 			}
 		}
 	};
@@ -1065,8 +3775,12 @@ export class FilesManager implements IFilesManager {
 				const storedFileName = path.basename(storedFile.filePath);
 				let found = false;
 				for (let smilFile of smilMediaArray) {
-					if (storedFileName === getFileName(smilFile.src)) {
-						debug(`File found in new SMIL file: %s`, storedFile.filePath);
+					const candidateBase = getFileName(smilFile.src);
+					// Match both the extensionless canonical (legacy) and the extensionful
+					// canonical produced when getFileName borrowed an extension from a
+					// resolved Location URL. Mirrors getCanonicalFileName's prefix scan.
+					if (storedFileName === candidateBase || storedFileName.startsWith(candidateBase + '.')) {
+						debug('[files] file found in SMIL: %s', storedFile.filePath);
 						found = true;
 						break;
 					}
@@ -1076,7 +3790,9 @@ export class FilesManager implements IFilesManager {
 					!found &&
 					storedFileName !== getFileName(smilUrl) &&
 					!storedFileName.includes(FileStructure.smilMediaInfoFileName) &&
-					!storedFileName.includes(FileStructure.offlineReports)
+					!storedFileName.includes(FileStructure.offlineReports) &&
+					!storedFileName.includes(FileStructure.storageInfoFileName) && // Preserve storage info files
+					!storedFile.filePath.includes('/storage/') // Preserve all storage folders and their contents
 				) {
 					// delete only path with files, not just folders
 					if (
@@ -1085,11 +3801,425 @@ export class FilesManager implements IFilesManager {
 							filePath: storedFile.filePath,
 						}))
 					) {
-						debug(`File was not found in new SMIL file, deleting: %O`, storedFile);
+						debug('[files] file not in SMIL, deleting: %O', storedFile);
 						await this.deleteFile(storedFile.filePath);
 					}
 				}
 			}
+		}
+	};
+
+	/**
+	 * Helper Methods
+	 */
+
+	/**
+	 * Check if content is needed by any other URLs in the playlist
+	 * @param contentValue - The content value to check
+	 * @param excludeUrlOrFileName - URL or filename to exclude from the check
+	 * @param filesList - List of all files in the playlist
+	 * @param mediaInfoObject - Current media info state
+	 * @returns true if content is needed by other URLs, false otherwise
+	 */
+	private isContentNeededByOtherUrls = (
+		contentValue: string | number,
+		excludeUrlOrFileName: string,
+		filesList: MergedDownloadList[],
+		mediaInfoObject: MediaInfoObject,
+		pendingUpdates?: Map<string, string | number>,
+	): boolean => {
+		// Handle both URL and filename inputs
+		const excludeFileName = excludeUrlOrFileName.includes('/')
+			? getFileName(excludeUrlOrFileName) // It's a URL, convert to filename
+			: excludeUrlOrFileName; // It's already a filename
+
+		// Compare without query params - same content with different query params should be considered matching
+		const contentValueNoQuery = getUrlWithoutQueryParams(contentValue);
+
+		return filesList.some((f) => {
+			const fileName = getFileName(f.src);
+			if (fileName === excludeFileName) {
+				return false;
+			}
+
+			// Check pending updates first (future state after batch completes)
+			if (pendingUpdates && pendingUpdates.has(fileName)) {
+				// If this file will have different content after update,
+				// check if it matches the content we're evaluating
+				const pendingValue = pendingUpdates.get(fileName);
+				return pendingValue && getUrlWithoutQueryParams(pendingValue) === contentValueNoQuery;
+			}
+
+			// Fall back to current state (for files not in this batch)
+			const storedValue = mediaInfoObject[fileName];
+			return storedValue && getUrlWithoutQueryParams(storedValue) === contentValueNoQuery;
+		});
+	};
+
+	/**
+	 * Storage Info Management Methods
+	 */
+
+	/**
+	 * Get the appropriate storage folder based on media type
+	 */
+	private getStorageFolder = (mediaType: string): string => {
+		switch (mediaType) {
+			case 'video':
+				return FileStructure.storageVideos;
+			case 'audio':
+				return FileStructure.storageAudios;
+			case 'image':
+				return FileStructure.storageImages;
+			case 'ref':
+				return FileStructure.storageWidgets;
+			default:
+				debug('Unknown media type for storage folder: %s', mediaType);
+				return FileStructure.storageVideos; // Default fallback
+		}
+	};
+
+	/**
+	 * Load storage info from JSON file
+	 * Storage info maps Location header URLs (keys) to storage metadata (storagePath, originalFileName, timestamp, fileSize)
+	 * Keys may include query params - use getUrlWithoutQueryParams for comparison
+	 */
+	private getStorageInfo = async (storageFolder: string): Promise<Record<string, any>> => {
+		const infoPath = `${storageFolder}/${FileStructure.storageInfoFileName}`;
+
+		try {
+			if (!(await this.fileExists(infoPath))) {
+				debug('Storage info not found, creating new: %s', infoPath);
+				return {};
+			}
+
+			const content = await this.sos.fileSystem.readFile({
+				storageUnit: this.internalStorageUnit,
+				filePath: infoPath,
+			});
+
+			const parsed = JSON.parse(content);
+			debug('Loaded storage info from %s with %d entries', infoPath, Object.keys(parsed).length);
+			return parsed || {};
+		} catch (err) {
+			// Handle corrupted file gracefully - storage is optimization, not critical
+			debug('Error reading storage info from %s, returning empty: %O', infoPath, err);
+			return {};
+		}
+	};
+
+	/**
+	 * Save storage info to JSON file with error handling
+	 * Note: Storage directories are created at startup by createFileStructure()
+	 */
+	private saveStorageInfo = async (storageFolder: string, info: Record<string, any>): Promise<void> => {
+		try {
+			const infoPath = `${storageFolder}/${FileStructure.storageInfoFileName}`;
+
+			await this.sos.fileSystem.writeFile(
+				{
+					storageUnit: this.internalStorageUnit,
+					filePath: infoPath,
+				},
+				JSON.stringify(info, null, 2),
+			);
+
+			debug('Saved storage info to %s with %d entries', infoPath, Object.keys(info).length);
+		} catch (err) {
+			// Log but don't fail - storage is optimization, not critical
+			debug('Failed to save storage info to %s: %O', storageFolder, err);
+		}
+	};
+
+	/**
+	 * Ensure storage space by removing oldest file if we exceed the limit
+	 * Maintains maximum of STORAGE_MAX_FILES files per storage folder
+	 */
+	private ensureStorageSpace = async (storageFolder: string, protectedPaths?: Set<string>): Promise<void> => {
+		try {
+			const storageInfo = await this.getStorageInfo(storageFolder);
+			const entries = Object.entries(storageInfo);
+
+			// If we have reached the limit, delete the oldest file
+			if (entries.length >= STORAGE_MAX_FILES) {
+				// Sort by timestamp, oldest first
+				entries.sort((a, b) => {
+					const timestampA = a[1].timestamp || 0;
+					const timestampB = b[1].timestamp || 0;
+					return timestampA - timestampB;
+				});
+
+				// Find oldest non-protected file
+				const evictCandidate = entries.find(
+					([_key, entry]) => !protectedPaths || !protectedPaths.has(entry.storagePath),
+				);
+
+				if (evictCandidate) {
+					const [keyToDelete, entryToDelete] = evictCandidate;
+					try {
+						await this.deleteFile(entryToDelete.storagePath);
+						delete storageInfo[keyToDelete];
+						await this.saveStorageInfo(storageFolder, storageInfo);
+						debug(
+							'Deleted oldest storage file to make room (was at %d files): %s',
+							entries.length,
+							entryToDelete.storagePath,
+						);
+					} catch (err) {
+						debug('Failed to delete oldest storage file: %s, error: %O', entryToDelete.storagePath, err);
+					}
+				} else {
+					debug(
+						'All storage files are protected, temporarily exceeding limit (%d/%d) in %s',
+						entries.length,
+						STORAGE_MAX_FILES,
+						storageFolder,
+					);
+				}
+			} else {
+				debug('Storage space OK: %d/%d files in %s', entries.length, STORAGE_MAX_FILES, storageFolder);
+			}
+		} catch (err) {
+			debug('Error ensuring storage space for %s: %O', storageFolder, err);
+			// Continue anyway - we'll just overwrite if needed
+		}
+	};
+
+	/**
+	 * Preserve a file to storage folder before it gets overwritten
+	 * @param filePath - Current file path in active folder
+	 * @param contentValue - Content identifier (location URL for location strategy)
+	 * @param mediaType - Type of media (video/audio/image/ref)
+	 * @returns true if preserved successfully, false otherwise
+	 */
+	private preserveFileToStorage = async (
+		filePath: string,
+		contentValue: string | number,
+		mediaType: string,
+		protectedPaths?: Set<string>,
+	): Promise<boolean> => {
+		try {
+			// SMIL files should never be preserved to storage
+			if (filePath.includes('.smil')) {
+				debug('Skipping storage preservation for SMIL file: %s', filePath);
+				return false;
+			}
+
+			// Check available space before moving file
+			const fileStats = await this.getFileByPath(filePath);
+
+			// Check if file exists
+			if (!fileStats) {
+				debug('File not found or inaccessible, cannot preserve: %s', filePath);
+				return false;
+			}
+
+			const fileSize = fileStats.sizeBytes || MINIMAL_STORAGE_FREE_SPACE;
+
+			const hasSpace = await this.checkAvailableSpace(fileSize);
+			if (!hasSpace) {
+				debug('Not enough space to preserve file to storage: %s (size: %d bytes)', filePath, fileSize);
+				return false;
+			}
+
+			const storageFolder = this.getStorageFolder(mediaType);
+
+			// Key by base URL (without query params) so that same content with different
+			// query params (e.g., changing UUIDs) always maps to the same entry
+			const storageKey = getUrlWithoutQueryParams(String(contentValue));
+			const existingInfo = await this.getStorageInfo(storageFolder);
+
+			// Skip if already in storage — no need to re-copy
+			if (existingInfo[storageKey]) {
+				debug('Content already in storage, skipping preservation: %s', storageKey);
+				return true;
+			}
+
+			// Ensure we have space in storage (max 20 files)
+			await this.ensureStorageSpace(storageFolder, protectedPaths);
+
+			// Generate storage filename based on content value (without query params in hash)
+			// This ensures same content with different query params gets same filename
+			const storageFileName = getStorageFileName(String(contentValue));
+			const storagePath = `${storageFolder}/${storageFileName}`;
+
+			debug('Preserving file to storage: %s -> %s (content: %s)', filePath, storagePath, contentValue);
+
+			// Copy file to storage with rename
+			await this.sos.fileSystem.copyFile(
+				{
+					storageUnit: this.internalStorageUnit,
+					filePath,
+				},
+				{
+					storageUnit: this.internalStorageUnit,
+					filePath: storagePath,
+				},
+				{
+					overwrite: true,
+				},
+			);
+			await this.trackSpaceConsumed(storagePath);
+
+			// Re-read storageInfo after ensureStorageSpace may have evicted entries
+			const storageInfo = await this.getStorageInfo(storageFolder);
+			storageInfo[storageKey] = {
+				storagePath,
+				originalFileName: path.basename(filePath),
+				timestamp: Date.now(),
+				fileSize,
+			};
+			await this.saveStorageInfo(storageFolder, storageInfo);
+
+			debug('Successfully preserved file to storage: %s', storagePath);
+			return true;
+		} catch (err) {
+			debug('Failed to preserve file to storage: %s, error: %O', filePath, err);
+			return false;
+		}
+	};
+
+	/**
+	 * Check if content already exists in storage
+	 * @param contentValue - Content identifier to look for (location URL for location strategy)
+	 * @param mediaType - Type of media (video/audio/image/ref)
+	 * @returns Storage path if found, null otherwise
+	 */
+	private checkStorageForContent = async (
+		contentValue: string | number,
+		mediaType: string,
+	): Promise<string | null> => {
+		try {
+			const storageFolder = this.getStorageFolder(mediaType);
+			// Use storage-specific filename (without query params in hash)
+			const expectedFileName = getStorageFileName(String(contentValue));
+			const expectedPath = `${storageFolder}/${expectedFileName}`;
+
+			debug('Checking storage for content: %s in %s', contentValue, expectedPath);
+
+			// Direct file check first (fastest path)
+			if (await this.fileExists(expectedPath)) {
+				debug('Found in storage by direct path: %s', expectedPath);
+				return expectedPath;
+			}
+
+			// Check storage info as backup (in case file was named differently)
+			// After the fix, keys should be base URLs without query params.
+			// Legacy entries may still have full URLs with query params — clean those up.
+			const storageInfo = await this.getStorageInfo(storageFolder);
+			const contentValueNoQuery = getUrlWithoutQueryParams(contentValue);
+
+			// Deduplicate: remove legacy full-URL keys that match the same base URL
+			const keysToClean: string[] = [];
+			let matchedEntry: { storagePath: string } | null = null;
+
+			for (const [storedKey, entry] of Object.entries(storageInfo)) {
+				if (getUrlWithoutQueryParams(storedKey) === contentValueNoQuery) {
+					if (storedKey !== contentValueNoQuery) {
+						// Legacy key with query params — schedule for cleanup
+						keysToClean.push(storedKey);
+					}
+					if (entry.storagePath && !matchedEntry) {
+						matchedEntry = entry;
+					}
+				}
+			}
+
+			// Clean up legacy keys
+			if (keysToClean.length > 0) {
+				for (const key of keysToClean) {
+					delete storageInfo[key];
+				}
+				await this.saveStorageInfo(storageFolder, storageInfo);
+				debug('Cleaned up %d legacy storage keys for: %s', keysToClean.length, contentValueNoQuery);
+			}
+
+			if (matchedEntry) {
+				// Verify the file actually exists
+				if (await this.fileExists(matchedEntry.storagePath)) {
+					debug('Found in storage via info lookup: %s', matchedEntry.storagePath);
+					return matchedEntry.storagePath;
+				} else {
+					// File in metadata but not on disk - clean up metadata
+					debug('Storage info references missing file, cleaning up: %s', matchedEntry.storagePath);
+					delete storageInfo[contentValueNoQuery];
+					await this.saveStorageInfo(storageFolder, storageInfo);
+				}
+			}
+
+			debug('Content not found in storage: %s', contentValue);
+			return null;
+		} catch (err) {
+			debug('Error checking storage for content %s: %O', contentValue, err);
+			return null; // On error, proceed with download
+		}
+	};
+
+	/**
+	 * Restore a file from storage to temp folder
+	 * CRITICAL: File must be renamed to match the requesting URL's hash
+	 * @param storagePath - Path to file in storage
+	 * @param targetFolder - Target folder (e.g., FileStructure.videos)
+	 * @param requestingUrl - The URL that's requesting this content (used to generate correct filename)
+	 * @returns temp file path if restored successfully, null otherwise
+	 */
+	private restoreFromStorage = async (
+		storagePath: string,
+		targetFolder: string,
+		requestingUrl: string,
+		extensionHintUrl?: string,
+	): Promise<string | null> => {
+		try {
+			// Verify the storage file exists before attempting restoration
+			const fileStats = await this.getFileByPath(storagePath);
+
+			// Check if file exists
+			if (!fileStats) {
+				debug('Storage file not found or inaccessible: %s', storagePath);
+				return null;
+			}
+
+			// Floor guard: skip restoration if it would breach the minimum free space floor.
+			// (Updated 2026-04-19: was previously a deliberate non-check; now we enforce the
+			// MINIMAL_STORAGE_FREE_SPACE floor uniformly across every consume path.)
+			if (!(await this.hasFloorRoomForCopy(storagePath))) {
+				debug('Skipping restore-from-storage for %s - would breach minimum free space floor', storagePath);
+				return null;
+			}
+
+			// CRITICAL: Generate the correct filename based on the requesting URL.
+			// When the requesting URL has no extension (e.g. ".../content"), borrow
+			// it from the extensionHintUrl so the restored file's name matches what
+			// `parallelDownloadAllFiles` will look for at `task.actualDownloadPath`.
+			const targetFileName = getFileName(requestingUrl, extensionHintUrl);
+			// Always restore to temp folder first to preserve original content for movement detection
+			const tempFolder = this.getTempFolder(targetFolder);
+			const fullTargetPath = `${tempFolder}/${targetFileName}`;
+
+			debug('Restoring from storage to temp: %s -> %s (for URL: %s)', storagePath, fullTargetPath, requestingUrl);
+
+			// Copy file from storage to temp folder with the correct name
+			// We copy instead of move to keep it available for other potential uses
+			await this.sos.fileSystem.copyFile(
+				{
+					storageUnit: this.internalStorageUnit,
+					filePath: storagePath,
+				},
+				{
+					storageUnit: this.internalStorageUnit,
+					filePath: fullTargetPath,
+				},
+				{
+					overwrite: true,
+				},
+			);
+
+			debug('Successfully restored from storage to temp: %s -> %s', storagePath, fullTargetPath);
+			await this.trackSpaceConsumed(fullTargetPath);
+			return fullTargetPath; // Return the temp path for tracking
+		} catch (err) {
+			debug('Failed to restore from storage: %s, error: %O', storagePath, err);
+			return null; // Will trigger normal download
 		}
 	};
 }

@@ -60,13 +60,12 @@ This is an advanced use case.
 
 ### Usage of the sub-regions
 
-Sub-region is defined a child tag of another `<region>`.
+Sub-region is defined as a child tag of another `<region>`:
 
-Sub-region is defined as a child tag of another `<region>`.
+```xml
 <region regionName="trigger-region">
-<region regionName="trigger-sub-region1"/>
+    <region regionName="trigger-sub-region1"/>
 </region>
-
 ```
 
 1. The `trigger-sub-region1` can completely occupy the parent `<region>`:
@@ -113,14 +112,19 @@ flow of the dynamically assigning sub-regions is as follows:
    automatically assigned to the `trigger-sub-region2`
 
 > Triggered playlist is always looking for the first available (empty) sub-region. If no sub-region is available (all
-> are occupied by the previously triggered playlists), it overrides the first sub-region.
+> are occupied by the previously triggered playlists), it overrides the first sub-region. A sub-region counts as
+> available when nothing *trigger- or dynamic-initiated* is playing in it — regular content is simply displaced. All
+> media of one trigger activation stay together in the sub-region chosen when the trigger fired.
 
 ## Triggering content
 
-To trigger content by the pre-defined `triggers` use trigger `id` in the `begin` attribute of the `<seq>` or `<par>`
-element.
+To trigger content by the pre-defined `triggers` use trigger `id` in the `begin` attribute of a `<seq>` element
+(wrapped in a `<par>`, as in the examples below — the `begin` must sit on the inner `<seq>`, not on a top-level
+`<par>`).
 
-The triggered playlist is automatically stopped whenever the condition defined in `<head>` is no longer `TRUE`.
+For sensor (RFID) triggers, the triggered playlist is automatically stopped whenever the condition defined in
+`<head>` is no longer `TRUE` (e.g. the tag is placed back). Keyboard, mouse, and widget triggers stop on their `dur`
+or `repeatCount` limit, on an explicit `end` attribute, or when another trigger claims the same sub-region.
 
 > For media and other elements **always set region attribute to the parent one**. Never use sub-regions in the region
 > attribute.
@@ -166,7 +170,8 @@ If you need the triggered content to play more than one time, you can adjust the
 </par>
 ```
 
-Or you can specify `dur` attribute to determine exactly how long should be trigger playing. Dur is specified in seconds.
+Or you can specify `dur` attribute to determine exactly how long should be trigger playing. Dur is specified in seconds
+(also accepts `indefinite`).
 
 ```xml
 
@@ -179,3 +184,34 @@ Or you can specify `dur` attribute to determine exactly how long should be trigg
     </seq>
 </par>
 ```
+
+Notes on duration:
+
+- With `dur`, the trigger playlist **loops** until the duration expires — it does not stop after a single pass.
+- When both `dur` and `repeatCount` are set, `dur` takes precedence.
+- For keyboard, mouse, and widget triggers, re-firing the trigger while it is already playing **extends** the
+  duration (the countdown restarts from the latest event).
+- For sensor (RFID) triggers, `dur` is ignored — use `repeatCount`, or rely on the condition turning `FALSE`.
+
+## Cross-trigger cancellation
+
+A trigger playlist's `end` attribute may name a **different** trigger. When that other trigger fires, the currently
+playing playlist is cancelled — this works for keyboard, mouse, and widget triggers (not for sensor or sync-failover
+triggers):
+
+```xml
+
+<par>
+    <!-- trigger1 starts this content; firing trigger2 stops it -->
+    <seq begin="trigger1" end="trigger2" dur="indefinite">
+        <video src="smil/samples/assets/landscape1.mp4"
+               region="trigger-region">
+        </video>
+    </seq>
+</par>
+```
+
+The cancelling trigger (`trigger2` above) does not need any playlist of its own — a trigger declared in `<head>` that
+never appears in a `begin` attribute acts as a pure "stop button": firing it cancels the playlist(s) that name it in
+`end`, and does nothing when none are playing. Setting `end` to the *same* id as `begin` makes the trigger toggle
+itself off when fired again (see the keyboard and mouse guides).

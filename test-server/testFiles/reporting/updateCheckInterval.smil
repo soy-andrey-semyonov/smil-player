@@ -1,0 +1,30 @@
+<smil>
+    <head>
+        <!-- High SMIL refresh so the playlist itself does not reload mid-test and
+             reset the ResourceChecker. Per-image updateCheckInterval drives the
+             HEAD cadence below, independent of this. -->
+        <meta http-equiv="Refresh" contentRefresh="90"/>
+        <layout>
+            <root-layout width="1080" height="1920"/>
+            <region regionName="main" left="0" top="0" width="1920" height="1080" z-index="1"/>
+        </layout>
+    </head>
+    <body>
+        <par repeatCount="indefinite">
+            <seq repeatCount="indefinite">
+                <!-- fast: HEAD-checked every 2s -->
+                <img dur="3s"
+                     src="http://localhost:3000/assets/landscape1.jpg"
+                     updateCheckUrl="http://localhost:3000/status-check/landscape1.jpg"
+                     updateCheckInterval="2"
+                     region="main" fit="fill"/>
+                <!-- slow: HEAD-checked every 15s -->
+                <img dur="3s"
+                     src="http://localhost:3000/assets/landscape2.jpg"
+                     updateCheckUrl="http://localhost:3000/status-check/landscape2.jpg"
+                     updateCheckInterval="15"
+                     region="main" fit="fill"/>
+            </seq>
+        </par>
+    </body>
+</smil>

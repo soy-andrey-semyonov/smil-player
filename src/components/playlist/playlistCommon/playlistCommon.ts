@@ -13,17 +13,21 @@ import { SMILTicker } from '../../../models/mediaModels';
 import { debug } from '../tools/generalTools';
 import { isNil } from 'lodash';
 import { SMILVideo } from '../../../models/mediaModels';
-import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
+import { ISos } from '../../../models/sosModels';
 import { FilesManager } from '../../files/filesManager';
 import { isConditionalExpExpired } from '../tools/conditionalTools';
 import { stopTickerAnimation } from '../tools/tickerTools';
 import { ExprTag } from '../../../enums/conditionalEnums';
 import { SMILEnums } from '../../../enums/generalEnums';
+import { SMILScheduleEnum } from '../../../enums/scheduleEnums';
+import { SMILTriggersEnum } from '../../../enums/triggerEnums';
+import { SMILDynamicEnum } from '../../../enums/dynamicEnums';
 import { IPlaylistCommon } from './IPlaylistCommon';
 import { DynamicPlaylistEndless } from '../../../models/dynamicModels';
+import { Deferred } from '../tools/Deferred';
 
 export class PlaylistCommon implements IPlaylistCommon {
-	protected sos: FrontApplet;
+	protected sos: ISos;
 	protected files: FilesManager;
 	protected cancelFunction: boolean[] = [];
 	protected currentlyPlaying: CurrentlyPlaying = {};
@@ -31,9 +35,12 @@ export class PlaylistCommon implements IPlaylistCommon {
 	protected currentlyPlayingPriority: CurrentlyPlayingPriority = {};
 	protected synchronization: Synchronization;
 	protected videoPreparing: VideoPreparing = {};
+	protected lastPreparedVideoUrl: { [regionName: string]: string } = {};
 	protected randomPlaylist: RandomPlaylist = {};
+	protected cancelDeferred: Deferred<void> = new Deferred<void>();
+	protected regionChangeDeferred: Deferred<void> = new Deferred<void>();
 
-	constructor(sos: FrontApplet, files: FilesManager, options: PlaylistOptions) {
+	constructor(sos: ISos, files: FilesManager, options: PlaylistOptions) {
 		this.sos = sos;
 		this.files = files;
 		this.cancelFunction = options.cancelFunction;
@@ -53,6 +60,20 @@ export class PlaylistCommon implements IPlaylistCommon {
 	protected getCancelFunction = (): boolean => {
 		return this.cancelFunction[this.cancelFunction?.length - 1];
 	};
+
+	protected waitForCancelFunction(): Promise<void> {
+		if (this.getCancelFunction()) { return Promise.resolve(); }
+		return this.cancelDeferred.promise;
+	}
+
+	public notifyRegionChange(): void {
+		this.regionChangeDeferred.resolve();
+		this.regionChangeDeferred = new Deferred<void>();
+	}
+
+	protected waitForRegionChange(): Promise<void> {
+		return this.regionChangeDeferred.promise;
+	}
 
 	/**
 	 * runs function given as parameter in endless loop
@@ -77,9 +98,13 @@ export class PlaylistCommon implements IPlaylistCommon {
 				dynamicPlaylist[dynamicPlaylistId]?.play === true)
 		) {
 			try {
-				await fn();
+				const result = await fn();
+				if (result === SMILScheduleEnum.allExpired) {
+					debug('[playback] breaking endless loop: all wallclock content expired');
+					break;
+				}
 			} catch (err) {
-				debug('Error: %O occurred during processing function %s', err, fn.name);
+				debug('[playback] error in %s: %O', fn.name, err);
 				throw err;
 			}
 		}
@@ -121,7 +146,7 @@ export class PlaylistCommon implements IPlaylistCommon {
 	 */
 	protected cancelPreviousMedia = async (regionInfo: RegionAttributes, isPlaylistUpdate: boolean = false) => {
 		debug(
-			'Cancelling media in region: %s with tag: %s',
+			'[playback] cancelling media: region=%s, tag=%s',
 			regionInfo.regionName,
 			this.currentlyPlaying[regionInfo.regionName]?.media,
 		);
@@ -135,38 +160,25 @@ export class PlaylistCommon implements IPlaylistCommon {
 			case 'ticker':
 				await this.cancelPreviousTicker(regionInfo);
 			default:
-				debug('Element not supported for cancellation');
+				debug('[playback] unsupported element for cancellation');
 				break;
 		}
 	};
 
 	/**
-	 * Cleans up priority tracking after an element finishes waiting or gets skipped
-	 * @param regionName - The region where priority tracking should be cleaned
-	 * @param version - Current playlist version
-	 * @param priorityLevel - The priority level to clean up
+	 * Clears the per-region identity fields after an element finishes/cancels so the
+	 * next cycle's findFirstFreeRegion reservation (which sets `playing=true` ~5s
+	 * before cmd-play) is not mistaken for a still-displaying element by gating
+	 * predicates such as isRegionOrNestedActive. Identity is set alongside the
+	 * visible flip in setCurrentlyPlaying, making `playing && (triggerValue ||
+	 * dynamicValue)` the reliable "actually painted" signal.
 	 */
-	protected cleanupPriorityTracking(regionName: string, version: number, priorityLevel?: number): void {
-		if (!this.promiseAwaiting[regionName]) {
-			return;
-		}
-
-		const promiseObj = this.promiseAwaiting[regionName] as any;
-
-		// Reset highest processing priority if it matches the one being cleaned up
-		if (priorityLevel !== undefined && promiseObj.highestProcessingPriority === priorityLevel) {
-			// Reset to -1 (no priority) so lower priorities can proceed
-			promiseObj.highestProcessingPriority = -1;
-			debug(
-				`Cleaned up priority tracking for region ${regionName}, priority ${priorityLevel}, version ${version} - resetting to allow lower priorities to proceed`,
-			);
-		}
-
-		// Clean up version if it's outdated
-		if (promiseObj.version && promiseObj.version < version) {
-			promiseObj.version = version;
-			debug(`Updated version tracking for region ${regionName} from ${promiseObj.version} to ${version}`);
-		}
+	private clearRegionIdentity(regionName: string): void {
+		const entry = this.currentlyPlaying[regionName];
+		if (!entry) { return; }
+		delete entry[SMILDynamicEnum.dynamicValue];
+		delete entry[SMILTriggersEnum.triggerValue];
+		delete entry.syncGroupName;
 	}
 
 	/**
@@ -176,9 +188,9 @@ export class PlaylistCommon implements IPlaylistCommon {
 	 */
 	private cancelPreviousHtmlElement = async (regionInfo: RegionAttributes, isPlaylistUpdate?: boolean) => {
 		try {
-			debug('previous html element playing: %O', this.currentlyPlaying[regionInfo.regionName]);
+			debug('[playback] previous html element playing: region=%s', regionInfo.regionName);
 			if (isNil(this.currentlyPlaying[regionInfo.regionName])) {
-				debug('html element was already cancelled');
+				debug('[playback] html element already cancelled');
 				return;
 			}
 			const element = <HTMLImageElement>document.getElementById(this.currentlyPlaying[regionInfo.regionName].id);
@@ -192,6 +204,8 @@ export class PlaylistCommon implements IPlaylistCommon {
 
 			this.currentlyPlaying[regionInfo.regionName].player = 'stop';
 			this.currentlyPlaying[regionInfo.regionName].playing = false;
+			this.clearRegionIdentity(regionInfo.regionName);
+			this.notifyRegionChange();
 		} catch (err) {
 			await this.cancelPreviousVideo(regionInfo);
 		}
@@ -202,8 +216,10 @@ export class PlaylistCommon implements IPlaylistCommon {
 			stopTickerAnimation(this.currentlyPlaying[regionInfo.regionName] as SMILTicker);
 			this.currentlyPlaying[regionInfo.regionName].player = 'stop';
 			this.currentlyPlaying[regionInfo.regionName].playing = false;
+			this.clearRegionIdentity(regionInfo.regionName);
+			this.notifyRegionChange();
 		} catch (err) {
-			debug('error during ticker cancellation: %O', err);
+			debug('[playback] ticker cancellation error: %O', err);
 		}
 	};
 
@@ -213,9 +229,9 @@ export class PlaylistCommon implements IPlaylistCommon {
 	 */
 	private cancelPreviousVideo = async (regionInfo: RegionAttributes) => {
 		try {
-			debug('previous video playing: %O', this.currentlyPlaying[regionInfo.regionName]);
+			debug('[playback] previous video playing: region=%s', regionInfo.regionName);
 			if (isNil(this.currentlyPlaying[regionInfo.regionName])) {
-				debug('video was already cancelled');
+				debug('[playback] video already cancelled');
 				return;
 			}
 
@@ -235,7 +251,7 @@ export class PlaylistCommon implements IPlaylistCommon {
 					}
 				});
 			}
-			debug('Calling## video stop function - single video: %O', video);
+			debug('[playback] stopping video: %O', video);
 			await sosVideoObject.stop(
 				elementUrl,
 				localRegionInfo.left,
@@ -244,9 +260,11 @@ export class PlaylistCommon implements IPlaylistCommon {
 				localRegionInfo.height,
 			);
 			video.playing = false;
-			debug(`previous ${videoElement} stopped: %O`, video);
+			this.clearRegionIdentity(regionInfo.regionName);
+			this.notifyRegionChange();
+			debug('[playback] previous %s stopped: %O', videoElement, video);
 		} catch (err) {
-			debug('error during video cancellation: %O', err);
+			debug('[playback] video cancellation error: %O', err);
 		}
 	};
 }

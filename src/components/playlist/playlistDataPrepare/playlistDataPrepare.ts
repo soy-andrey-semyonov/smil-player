@@ -2,18 +2,18 @@
 import { PlaylistElement, PlaylistOptions } from '../../../models/playlistModels';
 import { TriggerList } from '../../../models/triggerModels';
 import { SMILFileObject } from '../../../models/filesModels';
-import { IStorageUnit, IVideoFile } from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
+import { IVideoFile } from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
 import { SMILTriggersEnum } from '../../../enums/triggerEnums';
 import { XmlTags } from '../../../enums/xmlEnums';
-import { computeSyncIndex, extractAdditionalInfo, getRegionInfo, removeDigits } from '../tools/generalTools';
+import { computePlayModeSyncRanges, computeSyncIndex, extractAdditionalInfo, getRegionInfo, removeDigits } from '../tools/generalTools';
 import { FileStructure } from '../../../enums/fileEnums';
 import { HtmlEnum } from '../../../enums/htmlEnums';
 import { SMILEnums } from '../../../enums/generalEnums';
-import { convertRelativePathToAbsolute, getFileName, getProtocol } from '../../files/tools';
+import { convertRelativePathToAbsolute, getProtocol } from '../../files/tools';
 import { createTickerElement } from '../tools/tickerTools';
 import { createDomElement } from '../tools/htmlTools';
 import { isNil, isObject } from 'lodash';
-import FrontApplet from '@signageos/front-applet/es6/FrontApplet/FrontApplet';
+import { ISos } from '../../../models/sosModels';
 import { FilesManager } from '../../files/filesManager';
 import Debug from 'debug';
 import { PlaylistCommon } from '../playlistCommon/playlistCommon';
@@ -25,7 +25,7 @@ const debug = Debug('@signageos/smil-player:playlistDataPrepare');
 export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistDataPrepare {
 	private globalRegionSyncIndex: { [key: string]: number } = {};
 
-	constructor(sos: FrontApplet, files: FilesManager, options: PlaylistOptions) {
+	constructor(sos: ISos, files: FilesManager, options: PlaylistOptions) {
 		super(sos, files, options);
 	}
 
@@ -33,7 +33,6 @@ export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistData
 	 * recursively traverses through playlist and gets additional info for all media  specified in smil file
 	 * @param playlist - smil file playlist, set of rules which media should be played and when
 	 * @param smilObject
-	 * @param internalStorageUnit - persistent storage unit
 	 * @param smilUrl
 	 * @param isSpecial - boolean value determining if function is processing trigger playlist, dynamic playlist or ordinary playlist
 	 * @param specialName - name of the trigger or dynamic element
@@ -41,15 +40,31 @@ export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistData
 	public getAllInfo = async (
 		playlist: PlaylistElement | PlaylistElement[] | TriggerList,
 		smilObject: SMILFileObject,
-		internalStorageUnit: IStorageUnit,
 		smilUrl: string,
 		isSpecial: boolean = false,
 		specialName: string = '',
+		underPlayModeParent: boolean = false,
 	): Promise<void> => {
 		let widgetRootFile: string = '';
 		let fileStructure: string = '';
 		let htmlElement: string = '';
 		let localRegionSyncIndex: { [key: string]: number } = {};
+
+		// Track playMode=one syncIndex ranges via a per-region snapshot of
+		// globalRegionSyncIndex taken at the outermost playMode parent. The delta
+		// after processing the subtree captures every media syncIndex assigned
+		// inside, regardless of whether media is a direct child or nested inside
+		// structure wrappers (<seq>, <par>). `underPlayModeParent` suppresses
+		// snapshotting at nested playMode parents so the outer range is not
+		// double-counted or split.
+		const isThisPlayMode = !isNil((playlist as { playMode?: unknown })?.playMode)
+			&& String((playlist as { playMode?: unknown }).playMode).toLowerCase() === 'one';
+		const recordRange = isThisPlayMode && !underPlayModeParent && !isSpecial;
+		const snapshotBefore: { [regionName: string]: number } | undefined = recordRange
+			? { ...this.globalRegionSyncIndex }
+			: undefined;
+		const childUnderPlayMode = underPlayModeParent || isThisPlayMode;
+
 		for (let [key, loopValue] of Object.entries(playlist)) {
 			specialName =
 				key === 'begin' &&
@@ -65,7 +80,7 @@ export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistData
 			let value: PlaylistElement | PlaylistElement[] = loopValue;
 
 			if (XmlTags.extractedElements.concat(XmlTags.textElements).includes(removeDigits(key))) {
-				debug('found %s element, getting all info', key);
+				debug('[prepare] processing %s element', key);
 				if (!Array.isArray(value)) {
 					value = [value];
 				}
@@ -90,7 +105,7 @@ export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistData
 						htmlElement = HtmlEnum.ticker;
 						break;
 					default:
-						debug(`Sorry, we are out of ${key}.`);
+						debug('[prepare] unsupported element type: %s', key);
 				}
 
 				for (const elem of value) {
@@ -119,10 +134,11 @@ export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistData
 						elem.syncIndex = this.globalRegionSyncIndex[elem.regionInfo.regionName];
 					}
 
-					const mediaFile = (await this.sos.fileSystem.getFile({
-						storageUnit: internalStorageUnit,
-						filePath: `${fileStructure}/${getFileName(elem.src)}${widgetRootFile}`,
-					})) as IVideoFile;
+					const mediaFile = (await this.files.getFileDetails(
+						elem,
+						fileStructure,
+						widgetRootFile,
+					)) as IVideoFile;
 					// in case of web page as widget, leave localFilePath blank
 					elem.localFilePath = mediaFile ? mediaFile.localUri : '';
 
@@ -150,8 +166,7 @@ export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistData
 							elem.transitionInfo = smilObject.transition[transitionId];
 						} else {
 							debug(
-								`No corresponding transition found for element: %O, with transitionType: %s`,
-								elem,
+								'[prepare] no matching transition: type=%s',
 								transitionId,
 							);
 						}
@@ -165,12 +180,29 @@ export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistData
 					if (key.startsWith(HtmlEnum.ticker)) {
 						elem.id = createTickerElement(elem, elem.regionInfo, key);
 					}
-					debug('all info extracted for element: %O', elem);
+					debug('[prepare] element info extracted: src=%s', elem.src);
 				}
 				// reset widget expression for next elements
 				widgetRootFile = '';
 			} else {
-				await this.getAllInfo(value, smilObject, internalStorageUnit, smilUrl, isSpecial, specialName);
+				await this.getAllInfo(value, smilObject, smilUrl, isSpecial, specialName, childUnderPlayMode);
+			}
+		}
+
+		// Record per-region playMode ranges from the snapshot delta.
+		if (snapshotBefore && this.synchronization) {
+			const deltas = computePlayModeSyncRanges(snapshotBefore, this.globalRegionSyncIndex);
+			if (Object.keys(deltas).length > 0) {
+				if (!this.synchronization.playModeSyncRanges) {
+					this.synchronization.playModeSyncRanges = {};
+				}
+				for (const [region, range] of Object.entries(deltas)) {
+					if (!this.synchronization.playModeSyncRanges[region]) {
+						this.synchronization.playModeSyncRanges[region] = [];
+					}
+					this.synchronization.playModeSyncRanges[region].push(range);
+					debug('[prepare] stored playMode range: region=%s, range=[%d, %d]', region, range.start, range.end);
+				}
 			}
 		}
 	};
@@ -178,25 +210,35 @@ export class PlaylistDataPrepare extends PlaylistCommon implements IPlaylistData
 	/**
 	 * Performs all necessary actions needed to process playlist ( delete unused files, extract widgets, extract regionInfo for each media )
 	 * @param smilObject - JSON representation of parsed smil file
-	 * @param internalStorageUnit - persistent storage unit
 	 * @param smilUrl - url for SMIL file so its not deleted as unused file ( actual smil file url is not present in smil file itself )
 	 */
 	public manageFilesAndInfo = async (
 		smilObject: SMILFileObject,
-		internalStorageUnit: IStorageUnit,
 		smilUrl: string,
 	) => {
+		// Reset sync index for fresh playlist processing
+		this.globalRegionSyncIndex = {};
+		if (this.synchronization) {
+			this.synchronization.playModeSyncRanges = {};
+		}
+
 		await this.files.currentFilesSetup(smilObject.ref, smilObject, smilUrl);
 
 		// has to before getAllInfo for generic playlist, because src attribute for triggers is specified during intro
-		await this.getAllInfo(smilObject.triggers, smilObject, internalStorageUnit, smilUrl, true);
-		debug('All triggers info extracted');
+		await this.getAllInfo(smilObject.triggers, smilObject, smilUrl, true);
+		debug('[prepare] all triggers extracted');
 
-		await this.getAllInfo(smilObject.dynamic, smilObject, internalStorageUnit, smilUrl, true);
-		debug('All dynamic playlist info extracted');
+		await this.getAllInfo(smilObject.dynamic, smilObject, smilUrl, true);
+		debug('[prepare] all dynamic playlists extracted');
 
 		// extracts region info for all medias in playlist
-		await this.getAllInfo(smilObject.playlist, smilObject, internalStorageUnit, smilUrl);
-		debug('All elements info extracted');
+		await this.getAllInfo(smilObject.playlist, smilObject, smilUrl);
+		debug('[prepare] all elements extracted');
+
+		// Set max sync indices for each region in synchronization object
+		if (this.synchronization && Object.keys(this.globalRegionSyncIndex).length > 0) {
+			this.synchronization.maxSyncIndexPerRegion = { ...this.globalRegionSyncIndex };
+			debug('[prepare] set maxSyncIndexPerRegion: %O', this.synchronization.maxSyncIndexPerRegion);
+		}
 	};
 }

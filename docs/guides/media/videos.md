@@ -42,6 +42,10 @@ number of seconds.
 <video src="https://demo.signageos.io/smil/zones/files/video_1.mp4" dur="15s"/>
 ```
 
+Without `dur`, the video plays until its natural end. Note the `dur` value must be a plain number of seconds
+(optionally with the `s` suffix) — SMIL clock-values like `dur="3000ms"` or `dur="01:02:03"` are **not** supported and
+will be misread as seconds.
+
 ## Videos in Background
 
 Do you need to play a **video in background**? The possibility to play videos in the background is currently under
@@ -59,9 +63,6 @@ In the Applet configuration set `videoBackground` to `true`.
 
 Learn more about [Applet configuration here](https://docs.signageos.io/hc/en-us/articles/4405238989458).
 
-## Set videos to play in the background in SMIL Player code
-
-1. Open the `parameters.ts` file
-1. Change `background: false` to
-   `background: true` https://github.com/signageos/smil-player/blob/master/config/parameters.ts#L6
-1. Build and upload this adjusted version of the SMIL Player
+Setting `videoBackground: "true"` requires no rebuild — the player reads it from the applet configuration at startup.
+With it enabled, videos play on the background video plane and images/widgets can be layered above them (you still
+cannot layer videos on top of each other).

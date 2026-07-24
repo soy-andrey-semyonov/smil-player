@@ -1,3 +1,7 @@
+---
+sidebar_position: 1
+---
+
 # Random playback
 
 The SMIL player offers functionality to specify a play mode for a specific playlist in the player's XML definition file.
@@ -12,7 +16,6 @@ SMIL player supports three types of play modes:
 - **random** - In every time player reaches segment, the SMIL player shuffles the playlist and plays the whole playlist
   in a random
   order.
-  order.
 - **random_one** - In every time player reaches segment, the SMIL player randomly picks one element from the playlist
   and plays
   only that element.
@@ -22,29 +25,56 @@ SMIL player supports three types of play modes:
   cycle, the SMIL player will pick the element that comes directly after the previous one. This behavior continues until
   the end of the playlist, after which it will start again from the beginning.
 
+The value is case-insensitive; an unknown value plays the whole playlist in normal order.
+
 ## Playlist definition
 
-Play mode is specified in the `playMode` attribute of the `seq` element.
+Play mode is specified in the `playMode` attribute of the `seq` element. The children may be plain media elements, or
+`<seq>`/`<par>` groups when one "element" should consist of several media played together — with `one` and
+`random_one`, each child group counts as a single pick:
 
 ```xml
 
 <seq playMode="one">
-    <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
-           region="main" soundLevel="0%"/>
+    <seq>
+        <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
+               region="main"/>
+    </seq>
+    <seq>
+        <img dur="3s"
+             src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"
+             region="main" fit="fill"/>
+        <img dur="3s"
+             src="https://demo.signageos.io/smil/samples/assets/landscape2.jpg"
+             region="main" fit="fill"/>
+    </seq>
+    <seq>
+        <img src="https://demo.signageos.io/smil/zones/files/img_1.jpg"
+             dur="3s" region="main"/>
+    </seq>
+</seq>
+```
 
+> **Limitation of `playMode="random"`:** shuffling works on playlists whose children are plain media elements (as in
+> the example below). Nested `<seq>`/`<par>` children are *not* reshuffled — they play in their defined order. Use
+> `random_one` (which fully supports nested children) if you need random selection of grouped content.
+
+```xml
+
+<seq playMode="random">
+    <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
+           region="main"/>
     <img dur="3s"
          src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"
          region="main" fit="fill"/>
     <img dur="3s"
          src="https://demo.signageos.io/smil/samples/assets/landscape2.jpg"
          region="main" fit="fill"/>
-    <img src="https://demo.signageos.io/smil/zones/files/img_1.jpg"
-         dur="3s" fit="hidden" region="main">
-        <param name="cacheControl" value="auto"/>
-    </img>
-    <img src="https://demo.signageos.io/smil/zones/files/img_2.jpg"
-         dur="3s" fit="hidden" region="main">
-        <param name="cacheControl" value="auto"/>
-    </img>
 </seq>
 ```
+
+## Synchronized playback
+
+`playMode="one"` works together with [multi-device synchronization](../synchronization/playback-synchronization.md):
+in a synced region, the coordination master broadcasts which element it picked, and the other devices play the same
+one — so randomised playlists stay identical across the whole sync group.

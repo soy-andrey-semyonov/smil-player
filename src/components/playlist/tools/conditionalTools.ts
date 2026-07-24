@@ -24,9 +24,17 @@ export function isConditionalExpExpired(
 	playerId: string = '',
 ): boolean {
 	if (Array.isArray(element)) {
-		return setDefaultAwait(element, playerName, playerId) !== SMILScheduleEnum.playImmediately;
+		const result = setDefaultAwait(element, playerName, playerId) !== SMILScheduleEnum.playImmediately;
+		if (result) {
+			debug('[conditional] array conditional expired: no playable item found');
+		}
+		return result;
 	}
-	return element.hasOwnProperty(ExprTag) && !checkConditionalExprSafe(element.expr!, playerName, playerId);
+	if (element.hasOwnProperty(ExprTag) && !checkConditionalExprSafe(element.expr!, playerName, playerId)) {
+		debug('[conditional] expression false, skipping: expr=%s', element.expr);
+		return true;
+	}
+	return false;
 }
 
 /**
@@ -61,7 +69,7 @@ export function checkConditionalExprSafe(expression: string, playerName: string 
 		expression = sanitizeConditionalExpr(expression);
 		return checkConditionalExpr(expression, playerName, playerId);
 	} catch (error) {
-		debug('Error happened during parsing expr attribute: %o', error);
+		debug('[conditional] parse error in expr: %O', error);
 		return false;
 	}
 }

@@ -43,21 +43,32 @@ the [Triggers article](https://docs.signageos.io/hc/en-us/articles/4405241368978
 </layout>
 ```
 
-### Define content triggered by the keyboard trigger
+### Define content triggered by the widget trigger
 
 ```xml
 
 <par>
     <seq begin="trigger1" repeatCount="indefinite">
         <img src="https://demo.signageos.io/smil/zones/files/img_1.jpg"
-             dur="5s" fit="hidden" region="video">
+             dur="5s" region="video">
         </img>
         <img src="https://demo.signageos.io/smil/zones/files/img_3.jpg"
-             dur="5s" fit="hidden" region="video">
+             dur="5s" region="video">
         </img>
     </seq>
 </par>
 ```
+
+### Duration and cancellation
+
+Widget triggers support the same playback controls as keyboard and mouse triggers:
+
+- `dur` — the triggered content loops for the given number of seconds (or `indefinite`); re-sending the same event
+  while playing extends the countdown. When both `dur` and `repeatCount` are set, `dur` wins.
+- `repeatCount` — number of playback passes.
+- `end` set to the **same** trigger id — sending the event again while playing cancels the content (toggle).
+- `end` set to a **different** trigger id — that trigger cancels this content when fired. See
+  [cross-trigger cancellation](triggers-interactivity.md#cross-trigger-cancellation).
 
 ### Function to send information from the widget to the SMIL player
 
@@ -74,6 +85,10 @@ function sendMessage(data) {
 	window.parent.dispatchEvent(event);
 }
 ```
+
+The `detail` value must be a **plain string** matching one of the `data` values declared in `<triggers>` — object
+payloads are ignored. Repeated events for a trigger that is already playing are idempotent (they extend the trigger's
+`dur` countdown rather than starting a second copy).
 
 
 

@@ -301,10 +301,10 @@ To do so, we will wrap the media in video region in the priorityClass.
 
     <priorityClass higher="stop" lower="defer" peer="stop">
         <!-- 
-          - the first priorityClass will be active from 30th of Jan to 31st of Jul 
+          - the first priorityClass will be active from 30th of June to 31st of July 2025
           - it will alter the "standard" loop in video region during this time
         -->
-        <par begin="wallclock(2025-06-30T00:00:00)" end="wallclock(2021-07-31T00:00:00)">
+        <par begin="wallclock(2025-06-30T00:00:00)" end="wallclock(2025-07-31T00:00:00)">
             <seq repeatCount="indefinite">
                 <video src="https://demo.signageos.io/smil/zones/files/video_3.mp4" region="video"></video>
                 <img src="https://demo.signageos.io/smil/zones/files/img_7.jpg" dur="5s" region="video"></img>
@@ -312,7 +312,7 @@ To do so, we will wrap the media in video region in the priorityClass.
         </par>
     </priorityClass>
 
-    <!-- the second priorityClass will be active any other day but 1st and 2nd of Jan -->
+    <!-- the second priorityClass plays whenever the scheduled campaign above is not active -->
     <priorityClass higher="stop" lower="defer" peer="stop">
         <par>
             <seq repeatCount="indefinite" begin="0">
@@ -427,7 +427,7 @@ topRightWidget are images shown based on the exact day of the week.
                 <par>
                     <excl>
                         <priorityClass higher="stop" lower="defer" peer="stop">
-                            <par begin="wallclock(2025-06-30T00:00:00)" end="wallclock(2021-07-31T00:00:00)">
+                            <par begin="wallclock(2025-06-30T00:00:00)" end="wallclock(2025-07-31T00:00:00)">
                                 <seq repeatCount="indefinite">
                                     <video src="https://demo.signageos.io/smil/zones/files/video_3.mp4"
                                            region="video"></video>

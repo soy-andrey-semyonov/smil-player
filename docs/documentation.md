@@ -11,7 +11,8 @@ Application config file, used for env_vars and sos package configuration ( video
 
 ### public/index.html
 
-Simple web page with input form. Insert url to SMIL file to process.
+Entry web page of the applet. The SMIL file URL is provided via the `smilUrl` applet configuration (there is no input
+form).
 
 ### src/index.ts
 
@@ -29,24 +30,30 @@ Component responsible for handling operations with files listed below: \
 - extract archives
 - create folder structure in storage unit
 
-Tools folder contains helper functions such as getting file name of path out of url.
+Sub-folders: **fetchingStrategies/** (pluggable update-check strategies — Last-Modified and Location header),
+**resourceChecker/** (interval-based update polling), and **tools/** with helper functions such as getting file name
+of path out of url.
 
 ### src/components/playlist
 
-Component responsible for recursively processing playlist in json format and playing all types of media. Contains
-function to play video, image, audio and widget as well as some third party web page. For actual playing of media it
-uses mostly SoS sdk functions which you can find more about here
+Component responsible for recursively processing playlist in json format and playing all types of media. For actual
+playing of media it uses mostly SoS sdk functions which you can find more about here
 https://developers.signageos.io/sdk.
 
 It contains function which is processing SMIL playlist in an infinite loop, as well as checking if smil file or any
 other media changed. If so, it will stop infinite playlist processing and restart whole process with freshly updated
 data.
 
-Tools folder contains helper functions for playlist processing, most importantly function for extracting and scheduling
-intervals specified in wallclock strings and repeatCount strings. This function decides if content should be played
-immediately or how long it should wait until content will be played ( of at all ).
+Sub-components:
 
-Mock folder contains parsed smil files from xmlParser/mock.
+- **playlistProcessor/** — the core playback engine: the main processing loop, the recursive playlist traverser, and
+  the per-element controller (play/pause/visibility, sync coordination)
+- **playlistDataPrepare/** — pre-processes the parsed SMIL into internal structures (regions, transitions, media info)
+- **playlistPriority/** — priority (`excl`/`priorityClass`) decision engine and conflict resolution
+- **playlistTriggers/** — keyboard/mouse/widget/sensor trigger handling and dynamic playlists
+- **playlistCommon/** — base class with shared playlist utilities
+- **tools/** — helper functions for playlist processing (wallclock/repeatCount scheduling, conditional expressions,
+  sync tools, html rendering tools, ticker tools, etc.)
 
 ### src/components/xmlParser
 
@@ -84,7 +91,7 @@ Complex tests for front-end part of application and media playing are missing fo
    https://docs.signageos.io/hc/en-us/articles/4405070294674-Hello-World-Setup-Developer-Environment
 3. How to run this project:
     1. install node modules => **npm install**
-    2. build application => **npm run prepare**, this will create dist folder with compiled source code
+    2. build application => **npm run build**, this will create dist folder with compiled source code
     3. run application => **npm start**
     4. steps above should complete without any error, your application is running on **http://your.pc.ip.address:8090**
 
@@ -100,7 +107,13 @@ npm run build --production
 - `smilUrl` is used for passing URL of the smil file
 - `backupImageUrl` is used for defining a failover image that will be shown in case the smil file is corrupted or
   fatal error occurs during playback
-- `serialPortDevice` is used for defining device address used for serial communication (like Nexmosphere sensors)
+- `serialPortDevice` is used for defining device address used for serial communication (like Nexmosphere sensors),
+  default `/dev/ttyUSB0`
+- `videoBackground` set to `true` to play videos on the background video plane (allows HTML overlays above video)
+- `reportUrl` custom endpoint for proof-of-play reports
+- `syncGroupName`, `syncServerUrl`, `syncGroupIds`, `syncDeviceId` — multi-device synchronization settings (see
+  [SMIL Player Configuration](guides/tutorials/smil-player-configuration.md))
+- `debugEnabled` set to `true` to enable debug logging
 
 ## Debugging
 

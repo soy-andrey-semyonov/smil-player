@@ -1,0 +1,29 @@
+<smil>
+    <head>
+        <meta http-equiv="Refresh" content="90"/>
+        <meta log="true" type="manual" endpoint="http://localhost:3000/report"/>
+        <layout>
+            <root-layout width="1080" height="1920"/>
+            <region regionName="main" left="0" top="0" width="1920" height="1080" z-index="1"/>
+        </layout>
+    </head>
+    <body>
+        <par repeatCount="indefinite">
+            <seq repeatCount="indefinite">
+                <!-- batch: playback PoP report is saved to offline storage, NOT posted now -->
+                <img dur="3s"
+                     src="http://localhost:3000/assets/landscape1.jpg"
+                     region="main" fit="fill"
+                     reportMode="batch"
+                     popName="batchImage" popType="image"
+                     popTags="batch1,batch2"/>
+                <!-- immediate (default): playback PoP report is posted right away -->
+                <img dur="3s"
+                     src="http://localhost:3000/assets/landscape2.jpg"
+                     region="main" fit="fill"
+                     popName="immediateImage" popType="image"
+                     popTags="imm1,imm2"/>
+            </seq>
+        </par>
+    </body>
+</smil>

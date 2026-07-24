@@ -15,8 +15,11 @@ function createSosMock(fileExistsResult: boolean): any {
 	};
 }
 
+// The merged FetchStrategy resolves to an UpdateCheckResult ({ shouldUpdate, value?,
+// statusCode?, contentLength? }). shouldUpdateLocalFile recomputes shouldUpdate from
+// the returned `value`, so the mock only needs to carry the last-modified value through.
 function createFetchStrategy(returnValue: string | null): FetchStrategy {
-	const strategy: FetchStrategy = async () => returnValue;
+	const strategy: FetchStrategy = async () => ({ shouldUpdate: false, value: returnValue ?? undefined });
 	strategy.strategyType = SMILEnums.lastModified;
 	return strategy;
 }
@@ -35,7 +38,7 @@ describe('shouldUpdateLocalFile (last-modified strategy)', () => {
 			LOCAL_FILE_PATH, TEST_MEDIA, mediaInfoObject, 5000, [], [], fetchStrategy,
 		);
 
-		expect(result).to.deep.equal({ shouldUpdate: false });
+		expect(result.shouldUpdate).to.equal(false);
 	});
 
 	it('should return shouldUpdate: true when file does not exist locally', async () => {
@@ -48,7 +51,8 @@ describe('shouldUpdateLocalFile (last-modified strategy)', () => {
 			LOCAL_FILE_PATH, TEST_MEDIA, mediaInfoObject, 5000, [], [], fetchStrategy,
 		);
 
-		expect(result).to.deep.equal({ shouldUpdate: true, value: serverDate });
+		expect(result.shouldUpdate).to.equal(true);
+		expect(result.value).to.equal(serverDate);
 	});
 
 	it('should return shouldUpdate: true when no stored value exists (first tracked download)', async () => {
@@ -62,7 +66,8 @@ describe('shouldUpdateLocalFile (last-modified strategy)', () => {
 			LOCAL_FILE_PATH, TEST_MEDIA, mediaInfoObject, 5000, [], [], fetchStrategy,
 		);
 
-		expect(result).to.deep.equal({ shouldUpdate: true, value: serverDate });
+		expect(result.shouldUpdate).to.equal(true);
+		expect(result.value).to.equal(serverDate);
 	});
 
 	it('should return shouldUpdate: false when Last-Modified is unchanged', async () => {
@@ -75,7 +80,7 @@ describe('shouldUpdateLocalFile (last-modified strategy)', () => {
 			LOCAL_FILE_PATH, TEST_MEDIA, mediaInfoObject, 5000, [], [], fetchStrategy,
 		);
 
-		expect(result).to.deep.equal({ shouldUpdate: false });
+		expect(result.shouldUpdate).to.equal(false);
 	});
 
 	it('should return shouldUpdate: true when Last-Modified is newer', async () => {
@@ -88,7 +93,8 @@ describe('shouldUpdateLocalFile (last-modified strategy)', () => {
 			LOCAL_FILE_PATH, TEST_MEDIA, mediaInfoObject, 5000, [], [], fetchStrategy,
 		);
 
-		expect(result).to.deep.equal({ shouldUpdate: true, value: newerDate });
+		expect(result.shouldUpdate).to.equal(true);
+		expect(result.value).to.equal(newerDate);
 	});
 
 	it('should return shouldUpdate: true when Last-Modified is older (rollback)', async () => {
@@ -101,7 +107,8 @@ describe('shouldUpdateLocalFile (last-modified strategy)', () => {
 			LOCAL_FILE_PATH, TEST_MEDIA, mediaInfoObject, 5000, [], [], fetchStrategy,
 		);
 
-		expect(result).to.deep.equal({ shouldUpdate: true, value: olderDate });
+		expect(result.shouldUpdate).to.equal(true);
+		expect(result.value).to.equal(olderDate);
 	});
 
 	it('should return shouldUpdate: false when server has no header (DEFAULT_LAST_MODIFIED fallback)', async () => {
@@ -113,6 +120,6 @@ describe('shouldUpdateLocalFile (last-modified strategy)', () => {
 			LOCAL_FILE_PATH, TEST_MEDIA, mediaInfoObject, 5000, [], [], fetchStrategy,
 		);
 
-		expect(result).to.deep.equal({ shouldUpdate: false });
+		expect(result.shouldUpdate).to.equal(false);
 	});
 });

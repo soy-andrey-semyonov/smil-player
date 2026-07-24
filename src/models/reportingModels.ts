@@ -41,17 +41,21 @@ export type SmilError = {
 	errorMessage: string;
 };
 
-export type SyncWait = {
-	type: 'SMIL.SyncWait-Started' | 'SMIL.SyncWait-Ended';
-	source: Source;
-	startedAt: Date;
-	groupName: string;
+export type SmilFileReport = {
+	type: 'SMIL.FileReport';
+	name: string;
+	status: number;
+	time: number;
+	url: string;
 };
 
 export interface CustomEndpointReport extends IRecordItemOptions {
-	recordedAt: string;
+	status: number;
+	time: number;
+	url: string;
+	isOfflineReport?: boolean;
 }
 
-export type Report = MediaPlayed | FileDownload | PlaybackStarted | SmilError | SyncWait;
+export type Report = MediaPlayed | FileDownload | PlaybackStarted | SmilError | SmilFileReport;
 export type ItemType = 'image' | 'video' | 'ref' | 'smil' | 'ticker';
 export type MediaItemType = 'image' | 'video' | 'ref' | 'ticker';

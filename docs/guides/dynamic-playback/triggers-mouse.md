@@ -5,12 +5,11 @@ From v1.6.1, you can use onClick/onTouch events as a trigger for activating cont
 ## Using onClick/onTouch to trigger content
 
 - The `origin` is always set as `mouse`
-- `data`: no data specified in this case. A SMIL file can have only one onClick/onTouch trigger per playlist.
-- `action` is always set to `click`
+- `data`: no data specified in this case. A SMIL file can have only **one** onClick/onTouch trigger per playlist — a
+  `data` value on a mouse condition would never match.
+- `action` is set to `click` (informational; both mouse clicks and touch events activate the trigger)
 
-You can define any number of triggers with various `data` values. Each `data` must be unique, and one `data` should not
-be
-a substring of another.
+The trigger fires on a click or touch **anywhere on the screen** — there is no way to restrict it to a region.
 
 ```xml
 
@@ -63,19 +62,16 @@ the [Triggers article](https://docs.signageos.io/hc/en-us/articles/4405241368978
 
 It's possible to specify trigger duration either by the `dur` attribute, which takes values in seconds, or by the
 `repeatCount`
-attribute, which counts each play of the trigger.
+attribute, which counts each play of the trigger. With `dur`, the trigger content loops until the duration expires;
+when both are set, `dur` wins. Clicking or touching again while the trigger is already playing **extends** its
+duration (the countdown restarts from the latest click). Clicks inside a widget shown by the trigger also count.
 
 ```xml
 
 <par>
     <!-- referencing <trigger id="trigger1"> defined in <head>      -->
-    <seq begin="trigger1" repeatCount="4">
+    <seq begin="trigger1" dur="10">
         <video src="https://demo.signageos.io/smil/zones/files/video_1.mp4"
-               region="trigger-region"> <!-- As a region you always set the parent of the sub-regions -->
-        </video>
-    </seq>
-    <seq begin="trigger2" dur="10">
-        <video src="https://demo.signageos.io/smil/zones/files/video_2.mp4"
                region="trigger-region"> <!-- As a region you always set the parent of the sub-regions -->
         </video>
     </seq>

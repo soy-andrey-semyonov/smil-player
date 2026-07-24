@@ -1,0 +1,42 @@
+<smil>
+    <head>
+        <!-- Priority interplay for the playability gate (plan flow f): the HIGHER
+             priorityClass holds the gated element. Every gate-skipped pass must release
+             the priority slot (releaseSlot) or the never-rendering element blocks the
+             region as a phantom and the LOWER class deadlocks - the exact failure mode
+             of the historical "phantom playing slot" bug (see priorityConditionalPhantom). -->
+        <meta http-equiv="Refresh" content="90" skipPlaybackOnHttpStatus="404"/>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#18182c"/>
+            <region regionName="main" left="0" top="0" width="1920" height="1080"
+                    z-index="1" backgroundColor="#18182c"/>
+        </layout>
+    </head>
+    <body>
+        <par>
+            <par repeatCount="indefinite">
+                <excl>
+                    <priorityClass higher="stop" lower="defer" peer="stop">
+                        <par>
+                            <seq repeatCount="indefinite">
+                                <img dur="3s" src="http://localhost:3000/cbp/image1.png" region="main" fit="fill"
+                                     playCheckUrl="http://localhost:3000/gate/check/image1"/>
+                            </seq>
+                        </par>
+                    </priorityClass>
+                    <priorityClass higher="stop" lower="defer" peer="stop">
+                        <par>
+                            <!-- Two alternating images so each produces a real visibility
+                                 transition (a single looping image never hides between
+                                 iterations and cannot be sampled reliably). -->
+                            <seq repeatCount="indefinite">
+                                <img dur="3s" src="http://localhost:3000/cbp/image2.png" region="main" fit="fill"/>
+                                <img dur="3s" src="http://localhost:3000/cbp/image3.png" region="main" fit="fill"/>
+                            </seq>
+                        </par>
+                    </priorityClass>
+                </excl>
+            </par>
+        </par>
+    </body>
+</smil>

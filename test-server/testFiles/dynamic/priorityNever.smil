@@ -1,0 +1,83 @@
+<smil>
+    <head>
+        <meta http-equiv="Refresh" content="444"/>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#FFFFFF"/>
+            <region regionName="video" left="0" top="0" width="1280" height="720" z-index="1" backgroundColor="#FFFFFF"
+                    mediaAlign="topLeft"/>
+        </layout>
+
+        <metadata>
+            <x-server xmlns="http://schemas.adfotain.org/adapi-1.0">
+
+                <subscriptionList>
+
+                    <subscription>
+                        <type>SystemReport</type>
+                        <action>https://demo.signageos.io/smil/zones/play/report/?player=99</action>
+                        <method>put</method>
+                    </subscription>
+
+                </subscriptionList>
+
+            </x-server>
+        </metadata>
+
+    </head>
+
+    <body systemComponent="http://www.w3.org/1999/xhtml" style="background-color:#FFFFFF">
+
+        <par>
+            <seq end="__prefetchEnd.endEvent">
+                <seq repeatCount="indefinite">
+                    <video src="https://demo.signageos.io/smil/samples/assets/loader.mp4"/>
+                </seq>
+            </seq>
+
+            <par begin="__prefetchEnd.endEvent" repeatCount="indefinite">
+                <excl repeatCount="indefinite">
+                    <priorityClass lower="never" peer="stop" higher="stop">
+                        <par begin="wallclock(R/2011-01-01T00:00:00/P1D)" end="wallclock(R/2011-01-01T23:59:59/P1D)">
+                            <seq repeatCount="indefinite">
+                                <excl begin="0" repeatCount="indefinite">
+                                    <!-- First priorityClass = highest priority -->
+                                    <!-- lower="never" means lower-priority content can NEVER play while this is active -->
+                                    <priorityClass higher="stop" pauseDisplay="hide" lower="never" peer="stop">
+                                        <par begin="NEVER_HIGH_BEGIN" end="NEVER_HIGH_END">
+                                            <seq repeatCount="indefinite">
+                                                <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
+                                                       id="annons0" fit="hidden" region="video">
+                                                    <param name="cacheControl" value="auto"/>
+                                                </video>
+                                                <img src="https://demo.signageos.io/smil/zones/files/img_1.jpg"
+                                                     id="annons1" dur="3s" fit="hidden" region="video">
+                                                    <param name="cacheControl" value="auto"/>
+                                                </img>
+                                            </seq>
+                                        </par>
+                                    </priorityClass>
+                                    <!-- Second priorityClass = lower priority -->
+                                    <!-- Cannot play while higher priority is active (lower="never" on first class) -->
+                                    <priorityClass higher="stop" pauseDisplay="hide" lower="defer" peer="stop">
+                                        <par begin="NEVER_LOW_BEGIN" end="NEVER_LOW_END">
+                                            <seq repeatCount="indefinite">
+                                                <img src="https://demo.signageos.io/smil/zones/files/img_3.jpg"
+                                                     id="annons1" dur="3s" fit="hidden" region="video">
+                                                    <param name="cacheControl" value="auto"/>
+                                                </img>
+                                                <img src="https://demo.signageos.io/smil/zones/files/img_2.jpg"
+                                                     id="annons1" dur="3s" fit="hidden" region="video">
+                                                    <param name="cacheControl" value="auto"/>
+                                                </img>
+                                            </seq>
+                                        </par>
+                                    </priorityClass>
+                                </excl>
+                            </seq>
+                        </par>
+                    </priorityClass>
+                </excl>
+            </par>
+        </par>
+    </body>
+</smil>

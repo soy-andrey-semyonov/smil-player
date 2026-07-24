@@ -56,7 +56,7 @@ sos organization set-default
 To run the SMIL Player, make sure you build it first.
 
 ```shell
-npm install && npm run prepare
+npm install && npm run build
 
 sos applet start --applet-dir dist --entry-file-path dist/index.html
 ```

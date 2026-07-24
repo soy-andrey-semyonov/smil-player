@@ -10,29 +10,39 @@ To turn logs on, you have to specify `<meta>` tag with log value in the SMIL hea
 </head>
 ```
 
-its also possible to specify multiple logging types at the same time:
+It's also possible to specify multiple logging types at the same time:
 
 ```xml
 
-<meta log="false" type="manual,standard" endpoint="testingEndpoint"/>
+<meta log="true" type="manual,standard" endpoint="testingEndpoint"/>
 ```
+
+`type="standard"` selects the event reports described on this page; `type="manual"` selects
+[proof-of-play reporting](proof-of-play.md). When `type` is omitted, `standard` is used; unknown values are ignored.
 
 ## Logged events
 
-- each file download successful or unsuccessful
-- each media playback successful or unsuccessful
-- some major errors ( trigger initialization, sensors etc...)
+- each real file download successful or unsuccessful (`SMIL.FileDownloaded`) — internal copy/restore operations are
+  not reported
+- each media playback successful or unsuccessful (`SMIL.MediaPlayed`; media playing in a synchronized region reports
+  as `SMIL.MediaPlayed-Synced`)
+- each (re)start of SMIL playlist processing (`SMIL.PlaybackStarted`)
+- some major errors ( trigger initialization, sensors etc...) (`SMIL.Error`)
 
 ## Payload of messages
 
 ### Download
+
+When a download fails, `errorMessage` contains the HTTP status code of the failed request (e.g., `"HTTP 502"`). On
+success, `errorMessage` is `null`. The `itemType` field identifies the media category: `image`, `video`, `ref`
+(widget/website), `ticker`, or `smil` (the playlist file itself).
 
 #### Success
 
 ```json
 {
   "type": "SMIL.FileDownloaded",
-  "itemType": "unknown",
+  "itemType": "image",
   "source": {
     "filePath": {
       "path": "smil/images/img_5_37da4499.jpg",
@@ -53,7 +63,7 @@ its also possible to specify multiple logging types at the same time:
 ```json
 {
   "type": "SMIL.FileDownloaded",
-  "itemType": "unknown",
+  "itemType": "image",
   "source": {
     "filePath": {
       "path": "smil/images/img_5_37da4499.jpg",
@@ -65,7 +75,7 @@ its also possible to specify multiple logging types at the same time:
   "startedAt": "2024-11-19T21:18:28.781Z",
   "succeededAt": null,
   "failedAt": "2024-11-19T21:18:29.483Z",
-  "errorMessage": "File not found"
+  "errorMessage": "HTTP 502"
 }
 ```
 
@@ -109,9 +119,11 @@ its also possible to specify multiple logging types at the same time:
   "startedAt": "2024-11-19T21:18:36.342Z",
   "endedAt": null,
   "failedAt": "2024-11-19T21:18:41.357Z",
-  "errorMessage": "Unsupported video format"
+  "errorMessage": "HTTP 500"
 }
 ```
+
+Playback failures always carry `errorMessage: "HTTP 500"` — free-text error descriptions are not emitted.
 
 ### General error
 

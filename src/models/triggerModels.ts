@@ -1,5 +1,6 @@
 import { SMILAudio, SMILImage, SMILIntro, SMILVideo, SMILWidget } from './mediaModels';
 import { RegionAttributes } from './xmlJsonModels';
+import { Deferred } from '../components/playlist/tools/Deferred';
 
 export type TriggerObject = {
 	seq: {
@@ -18,8 +19,9 @@ export type TriggerEndless = {
 		play: boolean;
 		syncCanceled: boolean;
 		latestEventFired: number;
-		regionInfo: RegionAttributes;
+		regionInfo?: RegionAttributes;
 		triggerRandom: number;
+		cancelDeferred?: Deferred<void>;
 	};
 };
 

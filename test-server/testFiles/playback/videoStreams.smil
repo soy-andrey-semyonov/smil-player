@@ -1,0 +1,44 @@
+<smil>
+    <head>
+        <meta http-equiv="refresh" content="20"/>
+        <layout>
+            <!-- define the screen resolution -->
+            <root-layout width="1920" height="1080" backgroundColor="#18182c"/>
+            <!-- define the screen layout zones in relative % -->
+            <region regionName="top-right" left="50%" top="0" width="50%" height="50%" z-index="1" backgroundColor="#fdc400"/>
+        </layout>
+    </head>
+    <body>
+        <par>
+
+            <!-- Play this intro video as long as the resources being prefetched -->
+            <seq end="__prefetchEnd.endEvent">
+                <seq repeatCount="indefinite">
+                    <!-- Play waiting prompt -->
+                    <video src="https://demo.signageos.io/smil/samples/assets/loader.mp4"/>
+                </seq>
+            </seq>
+
+            <!-- Downloading resources into the internal storage -->
+            <seq>
+                <prefetch src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"/>
+                <prefetch src="https://static.signageos.io/assets/video-test-2_e2ffa51f6a4473b815f39e7fb39239da.mp4"/>
+                <seq id="__prefetchEnd" dur="1s"/>
+            </seq>
+
+            <!-- Wait for the prefetch of media files, once done, start the playback -->
+            <par begin="__prefetchEnd.endEvent" repeatCount="indefinite">
+                <!-- indefinite loop of media files in the selected order -->
+                <seq repeatCount="indefinite">
+                    <img dur="3"
+                         src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"
+                         region="top-right" fit="fill"/>
+                    <video src="https://static.signageos.io/assets/video-test-2_e2ffa51f6a4473b815f39e7fb39239da.mp4"
+                           id="annons1" fit="hidden" region="top-right"/>
+                    <video src="http://localhost:3000/assets/video-test-1.mp4" isStream="true" dur="10"
+                           region="top-right" soundLevel="0%"/>
+                </seq>
+            </par>
+        </par>
+    </body>
+</smil>

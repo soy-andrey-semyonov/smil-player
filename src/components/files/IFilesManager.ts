@@ -1,16 +1,17 @@
 import { ItemType, MediaItemType, Report } from '../../models/reportingModels';
-import { IFile, IStorageUnit } from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
+import { IFile } from '@signageos/front-applet/es6/FrontApplet/FileSystem/types';
 import {
 	SMILAudio,
 	SMILImage,
 	SMILMediaNoVideo,
+	SMILTicker,
 	SMILVideo,
 	SMILWidget,
 	SosHtmlElement,
 } from '../../models/mediaModels';
 import { MediaInfoObject, MergedDownloadList, SMILFile, SMILFileObject } from '../../models/filesModels';
 import { SmilLogger } from '../../models/xmlJsonModels';
-import { Resource } from './resourceChecker/resourceChecker';
+import { Resource, UpdateDetection } from './resourceChecker/resourceChecker';
 import { FetchStrategy } from './fetchingStrategies/fetchingStrategies';
 
 export type { FetchStrategy };
@@ -18,9 +19,21 @@ export type { FetchStrategy };
 export interface UpdateCheckResult {
 	shouldUpdate: boolean;
 	value?: string;
+	statusCode?: number;
+	contentLength?: number;
+}
+
+// Per-file result from processNewContentUpdates, used by prePlayCheck to avoid
+// reading from shared Maps (batchUpdates, tempDownloads, pendingWasUpdated).
+export interface ProcessedFileUpdate {
+	fileName: string;
+	tempPath?: string;
+	updateValue?: string;
+	needsWasUpdated: boolean;
 }
 
 export interface IFilesManager {
+	getStorageUnitType: () => string;
 	setSmilUrl: (url: string) => void;
 	setSmiLogging: (smilLogging: SmilLogger) => void;
 	sendReport: (message: Report) => Promise<void>;
@@ -30,21 +43,22 @@ export interface IFilesManager {
 		localFilePath: string,
 		value: MergedDownloadList,
 		taskStartDate: Date,
-		errMessage: string | null,
+		statusCode?: number,
+		reportUrl?: string,
 	) => Promise<void>;
 	sendMediaReport: (
 		value: SMILVideo | SMILMediaNoVideo | SosHtmlElement,
 		taskStartDate: Date,
 		itemType: MediaItemType,
 		isMediaSynced: boolean,
-		errMessage: string | null,
+		statusCode?: number,
 	) => Promise<void>;
 	sendSmiFileReport: (localFilePath: string, src: string, errMessage: string | null) => Promise<void>;
 	currentFilesSetup: (widgets: SMILWidget[], smilObject: SMILFileObject, smilUrl: string) => Promise<void>;
 	getFileDetails: (
 		media: SMILVideo | SMILImage | SMILWidget | SMILAudio,
-		internalStorageUnit: IStorageUnit,
 		fileStructure: string,
+		suffix?: string,
 	) => Promise<IFile | null>;
 	shouldUpdateLocalFile: (
 		localFilePath: string,
@@ -68,8 +82,30 @@ export interface IFilesManager {
 		fetchStrategy: FetchStrategy,
 		forceDownload?: boolean,
 		latestRemoteValue?: number | string,
+		allFilesList?: MergedDownloadList[],
+		externalPendingUpdates?: Map<string, string | number>,
 	) => Promise<{ promises: Promise<void>[]; filesToUpdate: Map<string, number | string> }>;
 	createFileStructure: () => Promise<void>;
-	prepareDownloadMediaSetup: (smilObject: SMILFileObject) => Promise<Promise<void>[]>;
+	prepareDownloadMediaSetup: (smilObject: SMILFileObject) => Promise<void>;
 	prepareLastModifiedSetup: (smilObject: SMILFileObject, smilFile: SMILFile) => Promise<Resource[]>;
+	// Batch update methods for atomic mediaInfoObject updates
+	startBatch: () => void;
+	collectUpdate: (fileName: string, value: string) => void;
+	commitBatch: (filesList: MergedDownloadList[]) => Promise<void>;
+	// Batch download optimization methods
+	processNewContentUpdates: (detections: UpdateDetection[], allFilesList?: MergedDownloadList[]) => Promise<ProcessedFileUpdate[]>;
+	handleMovedContent: (detection: UpdateDetection) => Promise<void>;
+	prePlayCheck: (
+		media: SMILVideo | SMILImage | SMILWidget | SMILAudio,
+		mediaFolder: string,
+		smilObject: SMILFileObject,
+		allMediaList: MergedDownloadList[],
+	) => Promise<void>;
+	// playCheckUrl playability gate: true = skip playback this pass (never touches downloads/expr).
+	// SMILTicker is a first-class member (tickers route through playElement like other media),
+	// not just structurally assignable.
+	playCheckGate: (
+		media: SMILVideo | SMILImage | SMILWidget | SMILAudio | SMILTicker,
+		smilObject: SMILFileObject,
+	) => Promise<boolean>;
 }

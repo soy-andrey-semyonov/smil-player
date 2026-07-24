@@ -24,7 +24,8 @@ Exclusive playlists for a certain region are wrapped in `<excl>` tag:
 </excl>
 ```
 
-Inside the `<excl>` tag you put as many `<priorityClass>` tags as you want, ordered by the priority:
+Inside the `<excl>` tag you put as many `<priorityClass>` tags as you want, ordered by the priority — **the first
+`<priorityClass>` in document order has the highest priority**, each following one is lower:
 
 ```xml
 
@@ -57,9 +58,15 @@ The `<priorityClass>` has a couple of attributes to define what should happen if
 
 | Attributes | Default Value | Possible Values                      | Description                                                                                            |
 |:-----------|:--------------|:-------------------------------------|:-------------------------------------------------------------------------------------------------------|
-| peer       | stop          | "stop"\| "pause"\| "defer"\| "never" | Controls how child elements of this priorityClass will interrupt one another                           |
-| higher     | pause         | "stop"\| "pause"                     | REAControls how elements with higher priority will interrupt child elements of this priorityClassDME   |
-| lower      | deffer        | "defer"\| "never"                    | Controls how elements defined with lower priority will interrupt child elements of this priorityClass. |
+| peer       | never         | "stop"\| "pause"\| "defer"\| "never" | Controls how child elements of this priorityClass will interrupt one another                           |
+| higher     | stop          | "stop"\| "pause"                     | Controls how elements with higher priority will interrupt child elements of this priorityClass         |
+| lower      | defer         | "defer"\| "never"                    | Controls how elements defined with lower priority will interrupt child elements of this priorityClass. |
+
+Note that the player's default values (above) differ from the W3C SMIL defaults — most notably `peer` defaults to
+`never` and `higher` to `stop`. With `higher="pause"`, the interrupted content resumes where it left off once the
+higher-priority content finishes. For `lower`, only `defer` and `never` are meaningful: a `lower="stop"` is treated as
+`never` and `lower="pause"` as `defer` (lower-priority content is never allowed to stop or pause what is already
+playing).
 
 The validity of the `<priorityClass>` is defined by the `begin`, `end` and `expr` attributes on `<par>` elements inside
 the `priorityClass:`
@@ -257,3 +264,7 @@ In the `rightZone` plays `<excl>` playlist consists of 3 priority playlists.
 ## FAQ
 
 Important notice: to make the priority playlist work, you need to wrap the whole `<excl>` section with `<par>` tag.
+This is because the `begin` and `repeatCount` attributes on the `<excl>` element itself are **ignored** — looping
+comes from the surrounding `<par repeatCount="indefinite">` and from the `<seq repeatCount="indefinite">` inside each
+`priorityClass`. Priority behaviour (which class wins, pause/defer/stop rules) is likewise driven entirely by the
+`<priorityClass>` elements — media placed directly under `<excl>` without a `priorityClass` gets no priority handling.

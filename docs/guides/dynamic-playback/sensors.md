@@ -9,10 +9,15 @@ Nexmosphere supports a large number of industry-grade sensors and provides a gre
 
 ### Read More About Nexmosphere
 
-Link to Nexmosphere documentation, website, and other related resources.
+See the [Nexmosphere website](https://nexmosphere.com/) for sensor hardware documentation.
 
-You can define multiple sensors attached to the
+You can define multiple sensors attached to
 the [supported device](https://docs.signageos.io/hc/en-us/articles/4405231196946).
+
+The Nexmosphere controller is expected on serial port `/dev/ttyUSB0` by default; use the `serialPortDevice` applet
+configuration option to point the player at a different port (e.g. `COM3`). Currently the supported sensor type is
+the Nexmosphere **RFID antenna** (`type="rfid"` with `driver="nexmosphere"`); other sensor definitions are ignored.
+The `address` option is required — a sensor without it is skipped.
 
 ```xml
 
@@ -77,40 +82,13 @@ The code above will
 ```xml
 
 <trigger id="trigger1" condition="or">
-    <condition
-            origin="rfid1" <!-- Reference to the <sensor id="rfid1"> -->
-    data="5" <!-- Reference to the RFID tag ID you are using -->
-    action="picked" <!-- Reference to the user action with the RFID tag -->
-    />
+    <!-- origin: reference to the <sensor id="rfid1">;
+         data: the RFID tag ID you are using;
+         action: the user action with the RFID tag -->
+    <condition origin="rfid1" data="5" action="picked"/>
 </trigger>
 ```
 
-### Buttons [IN PROGRESS]
-
-This sensor is under integration; the API might change.
-
-**Sensor definition:**
-
-This sensor is under integration; the API might change.
-
-```xml
-
-<sensor type="button" id="button1" driver="nexmosphere">
-    <!-- Port on the Nexmosphere controller where the button is attached -->
-</sensor>
-```
-
-**Sensor actions:**
-
-- `pressed` once you press the button and keep pressed
-- `released` when you release the button
-
-```xml
-
-<trigger id="trigger1" condition="or">
-    <condition origin="button1" <!-- Reference to the <sensor id="button1"> -->
-    data="1" <!-- Reference to the button ID -->
-    action="released" <!-- Reference to the user action  -->
-    />
-</trigger>
-```
+Every RFID tag that can be picked up or placed must be declared in a trigger condition. Note that for sensor triggers
+the `dur` attribute on the triggered playlist is ignored — use `repeatCount`, or let the opposite action (e.g.
+`placed` after `picked`) end the content.

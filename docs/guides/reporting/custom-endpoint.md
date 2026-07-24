@@ -16,45 +16,65 @@ fetch("https://stage.customEndpoint.com/api/webhooks/device-proof-of-play/cm0w68
 	"headers": {
 		"content-type": "application/json",
 	},
-	"body": "[{\"name\":\"media-playback\",\"playbackSuccess\":true,\"type\":\"video\",\"tags\":[\"ckr1u68ig890351znnshenikir\",\"cm0w686jl009si1l4jcxhhiey\",\"cm34j6ldy0035ib6ryzevjwsi\",\"clumdj8st57992mn0dc1umbna\"],\"recordedAt\":\"2024-11-20T22:55:02.599Z\"}]",
+	"body": "[{\"name\":\"media-playback\",\"playbackSuccess\":true,\"type\":\"video\",\"tags\":[\"ckr1u68ig890351znnshenikir\",\"cm0w686jl009si1l4jcxhhiey\",\"cm34j6ldy0035ib6ryzevjwsi\",\"https://cdn.example.com/video.mp4\"],\"status\":200,\"time\":1732146902,\"url\":\"https://cdn.example.com/video.mp4\"}]",
 	"method": "POST"
 });
 ```
 
-The SMIL player also supports offline caching of reports, so if the device is offline, it will store the reports in
-local storage and send them in bulk, 100 reports at a time, when the device goes online again.
+## Offline storage and retries
+
+Whenever a POST to the endpoint fails — the device is offline, or the endpoint answers with a non-2xx status — the
+report is saved to local storage instead of being lost. Stored reports are uploaded in bulk (up to 100 reports per
+file) on the next reporting pass once the endpoint is reachable again. Reports that were re-uploaded from offline
+storage carry an extra field so you can distinguish them from live reports:
+
+```json
+{ "name": "media-playback", "...": "...", "isOfflineReport": true }
+```
 
 ## Setup
 
 To enable logging, you must specify a `<meta>` tag with a log value in the SMIL header.
-To turn logs on, you have to specify `<meta>` tag with log value in smil header.
 
 ```xml
 
 <meta log="true" type="manual" endpoint="customUrlEndpoint"/>
 ```
 
-its also possible to specify multiple logging types at the same time:
+It's also possible to specify multiple logging types at the same time:
 
 ```xml
 
-<meta log="false" type="manual,standard" endpoint="testingEndpoint"/>
+<meta log="true" type="manual,standard" endpoint="testingEndpoint"/>
 ```
+
+`type="manual"` selects proof-of-play reporting, `type="standard"` selects the
+[standard event reporting](event-reporting.md); listing both runs both. Unknown types are ignored, and when `type` is
+omitted entirely, `standard` is used.
+
+Alternatively, the endpoint can be set device-side with the `reportUrl` applet configuration option. When set, it
+overrides the `endpoint` from the SMIL `<meta>`, force-enables reporting, and *adds* the proof-of-play type to whatever
+types the SMIL configures. See [SMIL Player Configuration](../tutorials/smil-player-configuration.md).
+
+> Note: `log="false"` disables the standard and native proof-of-play transports, but custom-endpoint POSTs are
+> controlled by the presence of the `endpoint` (or `reportUrl` config) — remove the endpoint if you want them to stop.
 
 ### PoP attributes for each element you want reports for in smil playlist
 
-The PopName attribute is mandatory. If it's not present, the report will not be sent. For other attributes, you can
-specify custom values that will be included in the report. The popTags attribute is optional, allowing you to specify
-multiple tags
-separated by commas, which will
-be sent as an array in the report.
+All `pop*` attributes are optional — a report is sent for every media element whenever proof-of-play logging
+(`type="manual"`) is active. Attributes you set are included in the report; attributes you omit are left out of the
+payload entirely. The `popTags` attribute allows you to specify multiple tags separated by commas, which will be sent
+as an array in the report — the player appends the content's final URL as the last array entry.
+
+Note the report's `name` field is set by the player itself (`media-playback`, `media-download`, `playlist-download`,
+`playlist-playback`) and identifies the event type — the `popName` attribute value is not carried in custom-endpoint
+payloads. Use `popCustomId` or `popFileName` to identify individual media items.
 
 ```xml
 
 <img src="srcToElement"
      dur="15s"
      region="region"
-     popName="video1"
      popType="video"
      popCustomId="customId"
      popFileName="First video"
@@ -68,7 +88,9 @@ By default, reports are sent immediately via HTTP POST as each media event occur
 ### Values
 
 - **`immediate`** (default) — Reports are sent via HTTP POST to the configured endpoint as they occur. This is the default behavior when `reportMode` is omitted.
-- **`batch`** — Reports are saved to local CSV storage and uploaded in bulk every 10 minutes. This reduces network traffic and is useful for high-frequency playlists or unreliable connections.
+- **`batch`** — Playback reports are saved to local CSV storage and uploaded in bulk. This reduces network traffic and is useful for high-frequency playlists or unreliable connections.
+
+`reportMode` applies to **playback** reports only; download reports are always sent immediately.
 
 ### Usage
 
@@ -76,7 +98,7 @@ Add the `reportMode` attribute directly to any media element in your SMIL playli
 
 ```xml
 <seq>
-    <!-- This video's reports are batched to CSV and uploaded every 10 minutes -->
+    <!-- This video's playback reports are batched to CSV and uploaded in bulk -->
     <video src="https://example.com/video.mp4"
            region="main"
            popName="promo-video"
@@ -97,13 +119,17 @@ Add the `reportMode` attribute directly to any media element in your SMIL playli
 </seq>
 ```
 
-### Batch file limit
+### Batch file limit and upload timing
 
 When using `reportMode="batch"`, the `reportFileLimit` attribute on the `<meta>` tag controls how many reports are stored per batch file before a new file is created. The default is 100.
 
 ```xml
 <meta log="true" type="manual" endpoint="https://example.com/reports" reportFileLimit="50"/>
 ```
+
+The upload watcher runs every 10 minutes, but a file holding only batched reports is uploaded once it **reaches the
+`reportFileLimit`** (or after a player restart) — not merely because 10 minutes passed. Files that also contain
+failed-send reports are uploaded on the next watcher pass regardless of fill level.
 
 ## URL Redirect Handling
 
@@ -128,17 +154,49 @@ If your SMIL contains:
 <video src="https://content.example.com/video.mp4" popName="promo" .../>
 ```
 
-And the CDN redirects to `https://cdn-edge-1.example.com/video.mp4`, the PoP report will include the final CDN URL in the tags array, giving you visibility into actual content delivery paths.
+And the CDN redirects to `https://cdn-edge-1.example.com/video.mp4`, the PoP report will include the final CDN URL in the `url` field (and as the last entry of the `tags` array), giving you visibility into actual content delivery paths.
 
 ## Logged events
 
-- Each media playback, successful or unsuccessful
+- Each real file download (`media-download`) — internal copy/restore operations are not reported
+- Each media playback (`media-playback`)
+- Each download of the SMIL file itself (`playlist-download`)
+- Each (re)start of SMIL playlist processing (`playlist-playback`)
 
 ## Payload of messages
 
-### Playback
+All custom endpoint reports include a `status` field containing the HTTP status code and a `time` field with a Unix
+timestamp in **seconds**. The `url` field contains the content URL used for the report (the final URL after
+redirects). The `customId`, `type`, `fileName` and `tags` fields appear only when the corresponding `pop*` attribute
+is set on the element.
 
-#### Success
+**How to detect failures:** check the `status` field. Playback failures are reported with `status: 500`; download
+failures carry the HTTP error status of the failed request (or `502` when the download itself threw). The
+`playbackSuccess` field is currently always `true` and should not be used for failure detection.
+
+### Download (`media-download`)
+
+```json
+{
+  "name": "media-download",
+  "playbackSuccess": true,
+  "customId": "customId",
+  "type": "video",
+  "tags": [
+    "tag1",
+    "tag2",
+    "https://cdn.example.com/video.mp4"
+  ],
+  "fileName": "video.mp4",
+  "status": 200,
+  "time": 1732060768,
+  "url": "https://cdn.example.com/video.mp4"
+}
+```
+
+A failed download has the same shape with the error status in `status` (e.g. `502`).
+
+### Playback (`media-playback`)
 
 ```json
 {
@@ -147,32 +205,30 @@ And the CDN redirects to `https://cdn-edge-1.example.com/video.mp4`, the PoP rep
   "customId": "customId",
   "type": "image",
   "tags": [
-    "ckr1u68ig890351znnshenikir",
-    "cm0w686jl009si1l4jcxhhiey",
-    "cm2x29v78001y48p4xfpi97cu",
-    "cm2x1xfz2001t48p43qqoiav0"
+    "tag1",
+    "tag2",
+    "https://cdn.example.com/image.jpg"
   ],
-  "fileName": "video.mp4",
-  "recordedAt": "2024-11-19T21:59:28.977Z"
+  "fileName": "banner.jpg",
+  "status": 200,
+  "time": 1732060768,
+  "url": "https://cdn.example.com/image.jpg"
 }
 ```
 
-#### Fail
+A failed playback has the same shape with `"status": 500`.
+
+### Playlist records
+
+The SMIL file itself produces two record types (minimal shape — the SMIL element carries no `pop*` attributes):
 
 ```json
-{
-  "name": "media-playback",
-  "playbackSuccess": false,
-  "customId": "customId",
-  "type": "video",
-  "tags": [
-    "ckr1u68ig890351znnshenikir",
-    "cm0w686jl009si1l4jcxhhiey",
-    "cm2x29v78001y48p4xfpi97cu",
-    "cm2x1xfz2001t48p43qqoiav0"
-  ],
-  "fileName": "video.mp4",
-  "errorMessage": "Unsupported video type",
-  "recordedAt": "2024-11-19T21:59:28.977Z"
-}
+{ "name": "playlist-download", "playbackSuccess": true, "status": 200, "time": 1732060768, "url": "https://example.com/playlist.smil" }
 ```
+
+```json
+{ "name": "playlist-playback", "status": 200, "time": 1732060768, "url": "https://example.com/playlist.smil" }
+```
+
+`playlist-playback` is sent each time the player starts (or restarts) processing the playlist; a `status` of `902`
+indicates the SMIL file could not be parsed.
