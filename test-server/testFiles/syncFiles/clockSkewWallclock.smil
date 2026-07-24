@@ -1,0 +1,47 @@
+<smil>
+    <head>
+        <meta http-equiv="refresh" content="300"/>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#000000"/>
+            <region regionName="main" left="0" top="0" width="1920" height="1080" z-index="1" sync="true"/>
+        </layout>
+    </head>
+    <body>
+        <par>
+            <seq end="__prefetchEnd.endEvent">
+                <seq repeatCount="indefinite">
+                    <video src="https://demo.signageos.io/smil/samples/assets/loader.mp4"/>
+                </seq>
+            </seq>
+            <seq>
+                <prefetch src="https://demo.signageos.io/smil/samples/assets/landscape2.jpg"/>
+                <prefetch src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"/>
+                <prefetch src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"/>
+                <seq id="__prefetchEnd" dur="1s"/>
+            </seq>
+            <par begin="__prefetchEnd.endEvent" repeatCount="indefinite">
+                <seq repeatCount="indefinite">
+                    <!-- Always-active baseline pair: the only content UNSKEWED devices
+                         ever reach (syncIndex 0 and 1). Both master and slaves must
+                         keep cycling these in lockstep. -->
+                    <img dur="6s"
+                         src="https://demo.signageos.io/smil/samples/assets/landscape2.jpg"
+                         region="main" fit="fill"/>
+                    <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
+                           region="main" soundLevel="0%"/>
+                    <!-- Near-future wallclock (begin ~now+15min, server clock): FUTURE for
+                         an unskewed device for the whole test, but ACTIVE for a device
+                         whose clock is skewed forward by more than 15min. The skewed
+                         master then sees this third element as active and inflates its
+                         maxSyncIndexPerRegion, broadcasting a resync target the unskewed
+                         slaves can never reach. Pre-fix that froze the slaves; post-fix
+                         they fall back to their own observed max and keep cycling 0↔1. -->
+                    <img dur="6s"
+                         begin="SKEW_FUTURE_BEGIN" end="SKEW_FUTURE_END"
+                         src="https://demo.signageos.io/smil/samples/assets/landscape1.jpg"
+                         region="main" fit="fill"/>
+                </seq>
+            </par>
+        </par>
+    </body>
+</smil>

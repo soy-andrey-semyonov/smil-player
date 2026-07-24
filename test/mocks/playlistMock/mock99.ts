@@ -251,6 +251,8 @@ export const mockSMILFileParsed99 = {
 		{ dur: 'indefinite', src: 'adapi:blankScreen' },
 	],
 	audio: [],
+	checkBeforePlay: false,
+	checkAheadCount: 0,
 	dynamic: {},
 	intro: [
 		{
@@ -263,6 +265,7 @@ export const mockSMILFileParsed99 = {
 	triggerSensorInfo: {},
 	triggers: {},
 	skipContentOnHttpStatus: [],
+	skipPlaybackOnHttpStatus: [],
 	updateContentOnHttpStatus: [],
 	updateMechanism: 'last-modified',
 };

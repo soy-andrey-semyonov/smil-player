@@ -200,6 +200,8 @@ export const mockBrokenSmil = {
 	img: [],
 	ref: [],
 	audio: [],
+	checkBeforePlay: false,
+	checkAheadCount: 0,
 	dynamic: {},
 	intro: [
 		{
@@ -269,6 +271,7 @@ export const mockBrokenSmil = {
 	},
 	triggers: {},
 	skipContentOnHttpStatus: [],
+	skipPlaybackOnHttpStatus: [],
 	updateContentOnHttpStatus: [],
 	updateMechanism: 'last-modified',
 };

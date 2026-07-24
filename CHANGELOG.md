@@ -7,12 +7,159 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) a
 
 ## [Unreleased]
 
+### Added
+
+- `checkAheadCount` meta attribute — pre-checks a content slot a configurable number of positions ahead so updated
+  media is downloaded before it is due to play
+- `playCheckUrl` per-element playability gate — a dedicated URL HEAD-checked right before each play; when the status
+  is listed in the new `<meta skipPlaybackOnHttpStatus>` (required, independent of `skipContentOnHttpStatus`), the
+  element is skipped for that pass only and recovers automatically. Pure play/skip control with zero effect on
+  downloads or update checks; fails open (plays from cache) on network errors and unlisted statuses
+- cross-trigger cancellation — a trigger can now stop content started by a different trigger
+  (`begin="trigger1" end="trigger2"`), for widget, mouse, and keyboard triggers
+- reports uploaded from offline storage are now flagged with `isOfflineReport`
+- `checkBeforePlay` meta attribute to check each media file for updates right before playback instead of periodic
+  polling
+- `reportUrl` applet configuration option for custom reporting endpoint
+- HTTP status codes in custom endpoint and standard event download reports
+- batch download optimization with content deduplication for location header strategy
+- storage preservation system for content movement detection — avoids re-downloading when content moves to a new URL
+
+### Changed
+
+- **BREAKING:** the custom report (`reportUrl`) payload format changed: proof-of-play entries now include the HTTP
+  `status` and the played `url`, and use a numeric epoch `time` field in place of the previous `recordedAt` ISO
+  timestamp; a `playlist-playback` record is now sent each time the SMIL playlist (re)starts; the `SyncWait`
+  event-report type was removed. Consumers reading `recordedAt` must migrate to `time`
+- reduced startup time by checking media files for updates in parallel instead of one at a time
+- download reports are now sent only for real network downloads, not for internal copy or restore operations
+- content whose URL returns a status listed in `skipContentOnHttpStatus` is no longer downloaded or error-reported
+
+### Fixed
+
+- hardened `skipContentOnHttpStatus` / `skipPlaybackOnHttpStatus` / `updateContentOnHttpStatus` meta parsing: malformed
+  values (wrong separator, non-numeric entries, boolean-coerced `"true"`) no longer crash SMIL parsing or silently
+  produce never-matching status lists — invalid entries are dropped and a fully malformed list behaves as absent
+- fixed synchronized devices freezing on a black screen when a sync-group peer was temporarily on a different SMIL
+  version (e.g. during a staged content-update rollout) — the device now keeps playing its own content and re-syncs
+  automatically once the peers are back on the same version
+- fixed nested `<par repeatCount="indefinite">` regions playing once and then freezing on their last frame when a
+  sibling branch runs its own indefinite loop
+- fixed gallery and repeatCount-based playlists freezing on their last element after a content update (parent-identity
+  drift and lost play-count tracking)
+- fixed `expr`-disabled media leaving a phantom "playing" region that could deadlock other regions
+- fixed wallclock `begin` times more than ~24 days in the future activating immediately and jumping the playlist ahead
+  instead of waiting for their scheduled window
+- fixed video playback not recovering when an internal stop() call fails — playback is now retried
+- fixed an updated video continuing to play the old file, and the internal video-player pool filling up until playback
+  hung permanently, when a looping video was replaced during a content update
+- fixed playback stopping permanently when a video failed to open and never reported that it had ended — an upper
+  bound is now applied when no duration information is available
+- fixed a synchronized region freezing on a stale frame for many minutes when the sync master became unreachable —
+  after repeated failed coordination attempts the region continues playing on its own and rejoins the group
+  automatically once coordination messages arrive again
+- fixed synchronized devices freezing on a stale frame after a scheduled higher-priority campaign window closed —
+  every paused lower-priority playlist is now released, not just the most recent one
+- fixed regions playing the wrong content after a player restart when two playlist slots had swapped their media
+  between restarts
+- fixed in-use media being evicted from storage and re-downloaded when Location-header URLs carried changing query
+  parameters
+- fixed a burst of update-check requests per playback cycle when `checkAheadCount` was used on a playlist containing
+  unavailable content
+- fixed proof-of-play reports showing the wrong URL when the same media file is used in several playlist slots, and
+  reports using the SMIL query URL instead of the final Location-header URL
+- fixed already-downloaded content being deleted when its URL started returning a status listed in
+  `skipContentOnHttpStatus` — the local copy is now preserved and played
+- fixed empty SMIL playlists triggering the backup-image fallback; an intentionally empty playlist is now treated as a
+  valid state
+- fixed the default background image not clearing on the first playback cycle
+- fixed priority `higher="pause"` being ignored and always behaving as `stop`
+- fixed a lower-priority element incorrectly stopping or pausing the higher-priority content that was playing
+- fixed `lower="never"` allowing lower-priority content to appear alongside higher-priority content, against the SMIL
+  spec
+- fixed priority and dynamic-content races and pause/resume edge cases that could freeze playback or briefly show the
+  wrong region — including two peer regions stalling paused without either playing, and a region's normal content not
+  resuming after a trigger-activated dynamic insert finished
+- fixed competing wallclock-scheduled priority campaigns in sibling `<par>` groups all starting at once and ignoring
+  each other's defer/pause/stop rules; each campaign now respects its own `begin`/`end` window, and deferred
+  lower-priority content resumes once all campaigns have expired
+- fixed `playMode="one"` and `playMode="random_one"` playing all children instead of one when the children are nested
+  `<seq>`/`<par>` groups
+- fixed the SMIL playlist file deleting itself during a content update and falling back to the backup image
+- fixed the backup image not displaying (blank screen) when the SMIL file is invalid or missing
+- fixed a `checkBeforePlay` element staying permanently disabled after a single transient 404 — it now recovers on the
+  next cycle
+- fixed `updateMechanism="location"` filenames and content-update lookahead (extension taken from the Location header,
+  the correct upcoming slot is pre-checked, and skipped slots are re-checked)
+- fixed a request storm when content stayed unavailable — retries are now paced
+- fixed false media re-preparation and a temporary-file race during content refresh cycles
+- fixed devices filling up storage: a 100 MB minimum free-space floor is now enforced on every download and copy, free
+  space is tracked accurately, and downloads are skipped (instead of retried in a loop) when storage is full
+- fixed Tizen AVPlayer playback by not appending the `__smil_version` query to `file://` URIs
+- fixed a DOM event-listener leak that accumulated across playlist reloads
+- fixed stale region caching and free-region selection for nested trigger regions
+- fixed re-firing a widget trigger while its content was already playing spawning duplicate playback loops and leaking
+  video event listeners — repeated widget-trigger events are now idempotent
+- fixed a ticker animation timeout leak on re-entry and incorrect ticker spacing on first layout
+- fixed wallclock scheduling crashing on malformed weekday values, and hardened filename decoding and JSON parsing
+  against malformed input
+- fixed offline-stored reports not being retried on the next upload pass, SMIL meta logging types being lost when a
+  custom `reportUrl` is set, and `reportMode` not propagating to iframe-rendered media
+- fixed the promise-chain mutex breaking on a rejected batch commit
+- fixed playlist element errors cascading across regions — errors are now isolated per element
+- fixed playback errors during updates by copying instead of moving files during storage preservation
+- fixed offline report index tracking on startup to avoid overwriting existing reports
+- fixed duplicate downloads for URLs differing only in query parameters
+- fixed duplicate HEAD requests when update detection had already been performed
+- fixed the `forceDownload` flag being ignored when `skipUpdateCheck` is true
+- fixed SMIL files being preserved to storage
+
+## [3.2.11] - 2026-04-20
+
+### Added
+
+- rewritten sync protocol from timing-based to ACK-based synchronization for more reliable multi-device sync
+- priority-aware sync coordination — sync respects priority level transitions without desynchronizing devices
+- playMode=one sync support for sequential content advancement across synchronized devices
+- phase-specific sync coordination (prepare, play, finish) for smoother sync transitions
+- automatic resync detection and recovery when devices fall out of sync
+- improved debug logging across the entire player for better diagnostics
+
+### Changed
+
+- **BREAKING:** the new ACK-based sync protocol is not compatible with the previous timing-based protocol — all
+  devices in a sync group must be upgraded together; a mixed-version sync group will not synchronize
+
+### Fixed
+
+- fixed 60-second slave delay on wallclock-triggered priority transitions
+- fixed false priority-change detection during SMIL playlist updates
+- fixed slave infinite resync loop with playMode=one playlists
+- fixed sync index wraparound causing unreachable resync targets
+- fixed stale sync messages from previous cycles causing false resyncs
+- fixed race conditions in master/slave sync coordination
+- fixed last-modified rollback detection to avoid false re-downloads when content is rolled back
+- fixed file type lookup not matching correctly due to leading slash
+- fixed a crash ("object is not iterable") when a playlist element fell back to the default duration
+- fixed a startup crash on Chrome 38 devices caused by unguarded `URLSearchParams`
+
+## [3.2.10] - 2026-02-18
+
+### Added
+
+- add per-element `reportMode` attribute for batch reporting — elements with `reportMode="batch"` save reports to
+  offline CSV storage instead of HTTP POST
+
+### Fixed
+
+- fixed batch report files being uploaded before reaching the configured report file limit
+- fixed hardcoded report file limit constant instead of using parsed configuration value
+
 ## [3.2.9] - 2026-01-21
 
 ### Added
 
-- fallbackToPreviousPlaylist flag to allow playing new playlist only if it is valid, otherwise, continue playing the
-  previous playlist
+- landscape and portrait backup image support with automatic orientation detection
 
 ### Fixed
 
@@ -30,26 +177,31 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) a
 
 ### Added
 
-- add option to check for media updates using location header or url instead of last-modified header in the response
-- add option to skip or update content based on the status code from response
-- add allowLocalFallback option to fall back to cached content when server returns errors
-- add useInReportUrl attribute for reporting correct URL of element in case of redirects
-- add debugEnabled configuration option to enable debug logging based on timing config
-- add option to specify multiple logging types
+- `updateMechanism` meta attribute with `location` strategy — check for media updates using the Location
+  header/redirect URL instead of Last-Modified
+- `skipContentOnHttpStatus` and `updateContentOnHttpStatus` meta attributes to skip or force-update content based on
+  HTTP status codes
+- `contentRefresh` and `smilFileRefresh` meta attributes for separate SMIL file and media content refresh intervals
+- per-element update attributes: `updateCheckUrl`, `updateCheckInterval`, `allowLocalFallback`
+- `useInReportUrl` per-element attribute to control which URL appears in reports
+- `fallbackToPreviousPlaylist` meta attribute to continue playing previous valid playlist when a new SMIL file is
+  invalid or empty
+- `debugEnabled` applet configuration option
+- support for multiple logging types simultaneously (e.g., `type="manual,standard"`)
 
 ### Fixed
 
 - fixed widget triggers not working correctly
-- fixed smilFileRefresh interval timing
+- fixed SMIL file refresh interval not being applied separately from content refresh
+- fixed AbortController compatibility for older devices
 
 ## [3.2.6] - 2025-03-26
 
 ### Added
 
-- add configurable timeout for last-modified requests
-- choose sync-engine dynamically based on syncServerUrl param
-- add option to skip content based on server response
-- download files in parallel instead of sequential download
+- `timeOut` meta attribute for configurable HEAD request timeout (default 2000ms)
+- dynamic sync engine selection based on `syncServerUrl`
+- parallel file downloads instead of sequential
 
 ### Fixed
 

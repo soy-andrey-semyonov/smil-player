@@ -1,0 +1,26 @@
+<smil>
+    <head>
+        <meta http-equiv="Refresh" content="90"/>
+        <!-- type="manual,standard" => BOTH paths run: the manual (proof-of-play)
+             report is POSTed to the endpoint AND the standard SMIL.* record is
+             dispatched via sos.command.dispatch. This fixture proves the standard
+             dispatch still fires when combined with manual reporting. -->
+        <meta log="true" type="manual,standard" endpoint="http://localhost:3000/report"/>
+        <layout>
+            <root-layout width="1080" height="1920"/>
+            <region regionName="main" left="0" top="0" width="1920" height="1080" z-index="1"/>
+        </layout>
+    </head>
+    <body>
+        <par repeatCount="indefinite">
+            <seq repeatCount="indefinite">
+                <img dur="3s"
+                     src="http://localhost:3000/assets/landscape1.jpg"
+                     region="main" fit="fill"/>
+                <img dur="3s"
+                     src="http://localhost:3000/assets/landscape2.jpg"
+                     region="main" fit="fill"/>
+            </seq>
+        </par>
+    </body>
+</smil>

@@ -1,0 +1,36 @@
+<smil>
+    <head>
+        <meta http-equiv="Refresh" content="444"/>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#000000"/>
+            <region regionName="main" left="0" top="0" width="1920" height="1080" z-index="1"/>
+        </layout>
+    </head>
+    <body>
+        <par>
+            <!-- Intro while prefetching, so the windowed video is on-disk before it starts -->
+            <seq end="__prefetchEnd.endEvent">
+                <seq repeatCount="indefinite">
+                    <video src="https://demo.signageos.io/smil/samples/assets/loader.mp4"/>
+                </seq>
+            </seq>
+            <seq>
+                <prefetch src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"/>
+                <seq id="__prefetchEnd" dur="1s"/>
+            </seq>
+
+            <!-- Wallclock-windowed element. begin/end are both substituted by fillWallclock
+                 (relative to now); end passes WHILE the seq is mid-play. The inner
+                 <seq repeatCount="8"> is ONE long (~35s) in-flight element so `end` lands
+                 comfortably in the middle of it. `end` is a latest-START guard, so that
+                 in-flight element must finish its natural duration (keep advancing) past
+                 `end` — it must NOT be cut off at `end`. -->
+            <par begin="WC_BEGIN" end="WC_END">
+                <seq repeatCount="8">
+                    <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
+                           region="main" soundLevel="0%"/>
+                </seq>
+            </par>
+        </par>
+    </body>
+</smil>

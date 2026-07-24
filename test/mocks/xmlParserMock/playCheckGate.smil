@@ -1,0 +1,18 @@
+<smil>
+    <head>
+        <meta http-equiv="Refresh" content="90" skipContentOnHttpStatus="404" skipPlaybackOnHttpStatus="403,404,410"/>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#FFFFFF"/>
+            <region regionName="video" left="0" top="0" width="1920" height="1080" z-index="1"
+                    backgroundColor="#FFFFFF"/>
+        </layout>
+    </head>
+    <body>
+        <par>
+            <seq repeatCount="indefinite">
+                <video src="http://example.com/video.mp4" playCheckUrl="http://example.com/play-check/video" region="video"/>
+                <img src="http://example.com/image.png" dur="5s" region="video"/>
+            </seq>
+        </par>
+    </body>
+</smil>

@@ -3,12 +3,16 @@
 Transition definition is placed inside `<layout>` tag in SMIL file `<head>`.
 
 - The `xml:id` or `transitionName` is the ID of the transition used later in the playlist
-- `type` defines the behavior of the transition. Only `billboard` is currently supported
-- `subtype` visualization of the transition. Only `billboard` is currently supported
+- `type` set to `billboard`
+- `subtype` set to `billboard` (the other supported subtype is `crossfade` — see
+  [Crossfade Transition](crossfade-transition.md))
 - `dur` duration of the transition ( How long it will take to transition from one image to another). Specified in
   seconds, *supports* decimal values ( 0.6s )
-- `columnCount` number of columns in the billboard which will be animated
-- `direction` direction of the animation. Currently supported values are `left` and `right`
+- `columnCount` number of columns in the billboard which will be animated. Default: `20`
+- `direction` direction of the animation. Supported values are `left` and `right`. Default: `right`
+
+The billboard transition works for image → image only, and plays when the **next** element in the same region is an
+image — when a video follows, the transition is skipped.
 
 ```xml
 

@@ -1,4 +1,3 @@
-/* tslint:disable:missing whitespace */
 import * as chai from 'chai';
 import { mockSMILFileParsed234 } from '../../mocks/playlistMock/mock234';
 import { mockSMILFileTriggers } from '../../mocks/playlistMock/mockTriggers';
@@ -9,25 +8,44 @@ import {
 	mockParsed234Region,
 	mockParsedNestedRegionNoTopLeft,
 } from '../../mocks/playlistMock/mockRegions';
-// import { Playlist } from '../../../src/components/playlist/playlist';
-// import { Files } from '../../../src/components/files/files';
 import { SMILScheduleEnum } from '../../../src/enums/scheduleEnums';
 import {
+	checkSlowDevice,
+	computePlayModeSyncRanges,
+	computeSyncIndex,
 	extractAdditionalInfo,
+	findFirstMediaDescendant,
+	generateBackupImagePlaylist,
+	generateElementId,
 	generateParentId,
+	getConfigBoolean,
+	getConfigString,
+	getDefaultVideoParams,
 	getIndexOfPlayingMedia,
 	getLastArrayItem,
+	getNextElementToPlay,
 	getRegionInfo,
 	getStringToIntDefault,
+	orderJsonObject,
+	pickRandomOne,
+	processRandomPlayMode,
+	shuffleObject,
+	removeDigits,
+	removeLastArrayItem,
+	removeNestedProperties,
+	removeWhitespace,
 	sleep,
 } from '../../../src/components/playlist/tools/generalTools';
 import { extractDayInfo } from '../../../src/components/playlist/tools/wallclockTools';
 import {
+	areAllWallclocksPermanentlyExpired,
 	setDefaultAwait,
 	setElementDuration,
 	findDuration,
 } from '../../../src/components/playlist/tools/scheduleTools';
 import { PlaylistElement } from '../../../src/models/playlistModels';
+import { CurrentlyPlayingRegion } from '../../../src/models/playlistModels';
+import { RegionsObject } from '../../../src/models/xmlJsonModels';
 
 const expect = chai.expect;
 
@@ -51,8 +69,7 @@ describe('Playlist tools component', () => {
 					},
 				},
 			];
-			// @ts-ignore
-			let response = getIndexOfPlayingMedia(currentlyPlaying);
+			let response = getIndexOfPlayingMedia(currentlyPlaying as unknown as CurrentlyPlayingRegion[]);
 			expect(response).to.be.equal(0);
 
 			currentlyPlaying = [
@@ -72,8 +89,7 @@ describe('Playlist tools component', () => {
 					},
 				},
 			];
-			// @ts-ignore
-			response = getIndexOfPlayingMedia(currentlyPlaying);
+			response = getIndexOfPlayingMedia(currentlyPlaying as unknown as CurrentlyPlayingRegion[]);
 			expect(response).to.be.equal(2);
 
 			currentlyPlaying = [
@@ -93,8 +109,7 @@ describe('Playlist tools component', () => {
 					},
 				},
 			];
-			// @ts-ignore
-			response = getIndexOfPlayingMedia(currentlyPlaying);
+			response = getIndexOfPlayingMedia(currentlyPlaying as unknown as CurrentlyPlayingRegion[]);
 			expect(response).to.be.equal(2);
 
 			currentlyPlaying = [
@@ -114,8 +129,7 @@ describe('Playlist tools component', () => {
 					},
 				},
 			];
-			// @ts-ignore
-			response = getIndexOfPlayingMedia(currentlyPlaying);
+			response = getIndexOfPlayingMedia(currentlyPlaying as unknown as CurrentlyPlayingRegion[]);
 			expect(response).to.be.equal(-1);
 
 			let currentlyPlayingEmpty = [
@@ -131,67 +145,93 @@ describe('Playlist tools component', () => {
 				},
 				{},
 			];
-			// @ts-ignore
-			response = getIndexOfPlayingMedia(currentlyPlayingEmpty);
+			response = getIndexOfPlayingMedia(currentlyPlayingEmpty as unknown as CurrentlyPlayingRegion[]);
 			expect(response).to.be.equal(-1);
 		});
 	});
 
 	describe('Playlist tools component generateParentId tests', () => {
-		it('Should return correct parentId', () => {
-			const testTagNames = ['seq', 'par', 'priorityClass', 'excl', 'Something'];
+		const testTagNames = ['seq', 'par', 'priorityClass', 'excl', 'Something'];
 
-			const testObjects = [{ test: 13 }, { testing: 13 }, { test: 15 }, { test: 'asdadww' }, { test: true }];
+		const testObjects = [{ test: 13 }, { testing: 13 }, { test: 15 }, { test: 'asdadww' }, { test: true }];
 
-			const parentIds = [
-				'seq-50af0f3e4b3e765352ec6cba149db5f7',
-				'par-7e12fe876abb29990a9195aeeeb846c6',
-				'priorityClass-102bbcdc5b67ed8dc19af2bb0bb7b9ce',
-				'excl-0b3510264759cb397ccca49b226355f8',
-				'Something-2dc079c76f9e9d96e381878e30045dfd',
-			];
-			for (let i = 0; i < testTagNames.length; i += 1) {
-				let response = generateParentId(testTagNames[i], testObjects[i] as PlaylistElement);
+		const parentIds = [
+			'seq-50af0f3e4b3e765352ec6cba149db5f7',
+			'par-7e12fe876abb29990a9195aeeeb846c6',
+			'priorityClass-102bbcdc5b67ed8dc19af2bb0bb7b9ce',
+			'excl-0b3510264759cb397ccca49b226355f8',
+			'Something-2dc079c76f9e9d96e381878e30045dfd',
+		];
+
+		testTagNames.forEach((tagName, i) => {
+			it(`should return '${parentIds[i]}' for tag '${tagName}'`, () => {
+				let response = generateParentId(tagName, testObjects[i] as PlaylistElement);
 				expect(response).to.be.equal(parentIds[i]);
-			}
+			});
+		});
+
+		describe('stability under runtime playback mutations', () => {
+			// Parent IDs are element identity: the same SMIL element must hash to the
+			// same parent on every traversal pass, regardless of which runtime fields
+			// playback wrote onto the parsed tree. A drifting hash creates a duplicate
+			// tracking entry and a phantom peer conflict against the element's own
+			// seq-mates (deadlock: playlist stuck on last element of first cycle).
+			const makeGallerySeq = () => ({
+				repeatCount: '1',
+				video3: { src: 'https://cdn/m1.mp4', soundLevel: '0%', region: 'r1' },
+				img4: { src: 'https://cdn/c2.jpeg', dur: '5s', fit: 'fill', region: 'r1' },
+				video5: { src: 'https://cdn/m3.mp4', soundLevel: '0%', region: 'r1' },
+			});
+
+			it('img wasUpdated mutation from handleHtmlElementPrepare does not change the hash', () => {
+				const seq: any = makeGallerySeq();
+				const pristine = generateParentId('seq', seq);
+				seq.img4.wasUpdated = false;
+				expect(generateParentId('seq', seq)).to.be.equal(pristine);
+			});
+
+			it('video playing/localFilePath/id mutations do not change the hash', () => {
+				const seq: any = makeGallerySeq();
+				const pristine = generateParentId('seq', seq);
+				seq.video3.playing = true;
+				seq.video3.localFilePath = '/local/m1.mp4';
+				seq.img4.id = 'img-x';
+				expect(generateParentId('seq', seq)).to.be.equal(pristine);
+			});
 		});
 	});
 
 	describe('Playlist tools component getLastArrayItem tests', () => {
-		it('Should return correct array element', () => {
-			const testArrays = [[1, 2, 3, 4], [5], [1, 'testing'], [1, true]];
+		const testArrays = [[1, 2, 3, 4], [5], [1, 'testing'], [1, true]];
 
-			const lastElements = [4, 5, 'testing', true];
+		const lastElements = [4, 5, 'testing', true];
 
-			for (let i = 0; i < testArrays.length; i += 1) {
-				let response = getLastArrayItem(testArrays[i]);
+		testArrays.forEach((arr, i) => {
+			it(`should return '${lastElements[i]}' for [${arr}]`, () => {
+				let response = getLastArrayItem(arr);
 				expect(response).to.be.equal(lastElements[i]);
-			}
+			});
 		});
 	});
 
 	describe('Playlist tools component getRegionInfo tests', () => {
 		it('Should return default region for non-existing region name', () => {
-			// @ts-ignore
-			const response = getRegionInfo(mockSMILFileParsed234, 'InvalidRegionName');
+			const response = getRegionInfo(mockSMILFileParsed234 as unknown as RegionsObject, 'InvalidRegionName');
 			expect(response).to.eql(mockParsed234Layout);
 		});
 
 		it('Should return correct region for existing region name', () => {
-			// @ts-ignore
-			const response = getRegionInfo(mockSMILFileParsed234, 'video');
+			const response = getRegionInfo(mockSMILFileParsed234 as unknown as RegionsObject, 'video');
 			expect(response).to.eql(mockParsed234Region);
 		});
 
 		it('Should return correct region values for nested regions', () => {
-			// @ts-ignore
-			const response = getRegionInfo(mockSMILFileTriggers, 'video');
+			const response = getRegionInfo(mockSMILFileTriggers as unknown as RegionsObject, 'video');
 			expect(response).to.eql(mockParsedNestedRegion);
 		});
 
 		it('Should return correct region values for nested regions without top and left specified', () => {
-			// @ts-ignore
-			const response = getRegionInfo(mockSMILFileTriggersNoTopLeft, 'video');
+			const response = getRegionInfo(mockSMILFileTriggersNoTopLeft as unknown as RegionsObject, 'video');
 			expect(response).to.eql(mockParsedNestedRegionNoTopLeft);
 		});
 	});
@@ -208,119 +248,173 @@ describe('Playlist tools component', () => {
 	});
 
 	describe('Playlist tools component getStringToInt tests', () => {
-		it('Should return correct values for tested strings', async () => {
-			const testString = ['aaaa', '', '14', '99999', '50s', 'NaN'];
+		const testStrings = ['aaaa', '', '14', '99999', '50s', 'NaN'];
 
-			const intValues = [0, 0, 14, 99999, 50, 0, 0];
+		const intValues = [0, 0, 14, 99999, 50, 0];
 
-			for (let i = 0; i < testString.length; i += 1) {
-				const response = getStringToIntDefault(testString[i]);
+		testStrings.forEach((str, i) => {
+			it(`should return ${intValues[i]} for '${str}'`, () => {
+				const response = getStringToIntDefault(str);
 				expect(response).to.be.equal(intValues[i]);
-			}
+			});
 		});
 	});
 
 	describe('Playlist tools component setDefaultAwait tests', () => {
-		it('Should return correct value to await', async () => {
-			const testSchedules = [
-				[
-					{
-						begin: 'wallclock(2030-01-01T09:00)',
-						end: 'wallclock(2030-12-01T12:00)',
-						repeatCount: '1',
-						video: [],
-					},
-					{
-						begin: 'wallclock(2020-07-16T12:00)',
-						end: 'wallclock(2020-07-17T19:00)',
-						repeatCount: '1',
-						img: [],
-					},
-				],
-				[
-					{
-						begin: 'wallclock(2020-01-01T09:00)',
-						end: 'wallclock(2020-12-01T12:00)',
-						repeatCount: '1',
-						video: [],
-					},
-					{
-						begin: 'wallclock(2020-07-16T12:00)',
-						end: 'wallclock(2025-07-17T19:00)',
-						repeatCount: '1',
-						img: [],
-					},
-				],
-				[
-					{
-						begin: 'wallclock(2030-01-01T09:00)',
-						end: 'wallclock(2030-12-01T12:00)',
-						repeatCount: '1',
-						video: [],
-					},
-					{
-						begin: 'wallclock(2030-07-16T12:00)',
-						end: 'wallclock(2030-07-17T19:00)',
-						repeatCount: '1',
-						img: [],
-					},
-				],
-				[
-					{
-						begin: 'wallclock(2022-01-01T09:00)',
-						end: 'wallclock(2022-12-01T12:00)',
-						repeatCount: '1',
-						video: [],
-					},
-					{
-						begin: 'wallclock(2020-07-16T12:00)',
-						end: 'wallclock(2035-12-17T19:00)',
-						repeatCount: '1',
-						img: [],
-					},
-				],
-			];
+		const testSchedules = [
+			[
+				{
+					begin: 'wallclock(2030-01-01T09:00)',
+					end: 'wallclock(2030-12-01T12:00)',
+					repeatCount: '1',
+					video: [],
+				},
+				{
+					begin: 'wallclock(2020-07-16T12:00)',
+					end: 'wallclock(2020-07-17T19:00)',
+					repeatCount: '1',
+					img: [],
+				},
+			],
+			[
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2020-12-01T12:00)',
+					repeatCount: '1',
+					video: [],
+				},
+				{
+					begin: 'wallclock(2020-07-16T12:00)',
+					end: 'wallclock(2025-07-17T19:00)',
+					repeatCount: '1',
+					img: [],
+				},
+			],
+			[
+				{
+					begin: 'wallclock(2030-01-01T09:00)',
+					end: 'wallclock(2030-12-01T12:00)',
+					repeatCount: '1',
+					video: [],
+				},
+				{
+					begin: 'wallclock(2030-07-16T12:00)',
+					end: 'wallclock(2030-07-17T19:00)',
+					repeatCount: '1',
+					img: [],
+				},
+			],
+			[
+				{
+					begin: 'wallclock(2022-01-01T09:00)',
+					end: 'wallclock(2022-12-01T12:00)',
+					repeatCount: '1',
+					video: [],
+				},
+				{
+					begin: 'wallclock(2020-07-16T12:00)',
+					end: 'wallclock(2035-12-17T19:00)',
+					repeatCount: '1',
+					img: [],
+				},
+			],
+		];
 
-			const awaitTimes = [SMILScheduleEnum.defaultAwait, SMILScheduleEnum.defaultAwait, SMILScheduleEnum.defaultAwait, 0];
+		const awaitTimes = [SMILScheduleEnum.defaultAwait, SMILScheduleEnum.defaultAwait, SMILScheduleEnum.defaultAwait, 0];
 
-			for (let i = 0; i < testSchedules.length; i += 1) {
-				const response = setDefaultAwait(testSchedules[i]);
+		testSchedules.forEach((schedule, i) => {
+			it(`should return ${awaitTimes[i]} for schedule set ${i}`, () => {
+				const response = setDefaultAwait(schedule);
 				expect(response).to.be.equal(awaitTimes[i]);
-			}
+			});
+		});
+
+		it('should return playImmediately for element with no begin and no expr', () => {
+			const elements = [
+				{ dur: '5s', video: [] },
+			];
+			expect(setDefaultAwait(elements as PlaylistElement[])).to.be.equal(SMILScheduleEnum.playImmediately);
+		});
+
+		it('should return playImmediately when bare element follows expired wallclock', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2020-06-01T12:00)',
+					repeatCount: '1',
+					video: [],
+				},
+				{ dur: '5s', img: [] },
+			];
+			expect(setDefaultAwait(elements as PlaylistElement[])).to.be.equal(SMILScheduleEnum.playImmediately);
+		});
+
+		it('should return playImmediately for active wallclock with active conditional expr', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2035-12-01T12:00)',
+					expr: "adapi-compare(adapi-date(),'2030-01-01T00:00:00')<0",
+					video: [],
+				},
+			];
+			expect(setDefaultAwait(elements as PlaylistElement[])).to.be.equal(SMILScheduleEnum.playImmediately);
+		});
+
+		it('should return defaultAwait for active wallclock with expired conditional expr', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2035-12-01T12:00)',
+					expr: "adapi-compare(adapi-date(),'2010-01-01T00:00:00')<0",
+					video: [],
+				},
+			];
+			expect(setDefaultAwait(elements as PlaylistElement[])).to.be.equal(SMILScheduleEnum.defaultAwait);
+		});
+
+		it('should return playImmediately for expr-only element (no wallclock) with active expr', () => {
+			const elements = [
+				{
+					expr: "adapi-compare(adapi-date(),'2030-01-01T00:00:00')<0",
+					video: [],
+				},
+			];
+			expect(setDefaultAwait(elements as PlaylistElement[])).to.be.equal(SMILScheduleEnum.playImmediately);
+		});
+
+		it('should return defaultAwait for expr-only element (no wallclock) with expired expr', () => {
+			const elements = [
+				{
+					expr: "adapi-compare(adapi-date(),'2010-01-01T00:00:00')<0",
+					video: [],
+				},
+			];
+			expect(setDefaultAwait(elements as PlaylistElement[])).to.be.equal(SMILScheduleEnum.defaultAwait);
+		});
+
+		it('should return defaultAwait for single element with all-expired wallclock', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2020-06-01T12:00)',
+					repeatCount: '1',
+					video: [],
+				},
+			];
+			expect(setDefaultAwait(elements as PlaylistElement[])).to.be.equal(SMILScheduleEnum.defaultAwait);
 		});
 	});
 
-	// describe('Playlist tools component runEndlessLoop, disableLoop tests', () => {
-	// 	it('Should stop endless loop after given amount of time', async () => {
-	// 		const sos: any = {
-	// 			fileSystem: 'notSet',
-	// 			video: 'notSet',
-	// 			management: 'notSet',
-	// 			hardware: 'notSet',
-	// 		};
-	// 		const files = new Files(sos);
-	// 		const playlist = new Playlist(sos, files);
-	// 		const interval = 1000;
-	// 		const start = Date.now();
-	// 		await playlist.runEndlessLoop(async () => {
-	// 			await sleep(interval);
-	// 			playlist.disableLoop(true);
-	// 		});
-	// 		const end = Date.now();
-	// 		const timeWaited = end - start;
-	// 		expect(Math.abs(interval - timeWaited)).to.be.lessThan(50);
-	// 	});
-	// });
-
 	describe('Playlist tools component setDuration', () => {
-		it('Should return correct duration for various inputs', async () => {
-			const durationStrings = [`999`, `indefinite`, 'asdmaskd', 'Nan', '200', undefined];
-			const duration = [999000, Number.MAX_SAFE_INTEGER, 5000, 5000, 200000, 5000];
+		const durationStrings = [`999`, `indefinite`, 'asdmaskd', 'Nan', '200', undefined];
+		const duration = [999000, Number.MAX_SAFE_INTEGER, 5000, 5000, 200000, 5000];
 
-			for (let i = 0; i < durationStrings.length; i += 1) {
-				const response = setElementDuration(<string>durationStrings[i]);
+		durationStrings.forEach((str, i) => {
+			it(`should return ${duration[i]} for '${str}'`, () => {
+				const response = setElementDuration(<string> str);
 				expect(response).to.be.equal(duration[i]);
-			}
+			});
 		});
 	});
 
@@ -346,117 +440,766 @@ describe('Playlist tools component', () => {
 
 			testImage = extractAdditionalInfo(testImage);
 
-			expect(testImage.regionInfo.hasOwnProperty('fit')).to.be.equal(true);
+			expect(testImage.regionInfo).to.have.property('fit');
 		});
 	});
 
 	describe('Playlist tools component extractDayInfo', () => {
-		it('Should parse time string correctly', async () => {
-			const testingStrings = [
-				'2011-01-01T07:00:00',
-				'2011-01-01+w3T07:00:00',
-				'2011-01-01-w4T07:00:00',
-				'2022-01-01T22:00:00',
-			];
+		const testingStrings = [
+			'2011-01-01T07:00:00',
+			'2011-01-01+w3T07:00:00',
+			'2011-01-01-w4T07:00:00',
+			'2022-01-01T22:00:00',
+		];
 
-			const responses = [
-				{
-					timeRecord: '2011-01-01T07:00:00',
-					dayInfo: '',
-				},
-				{
-					timeRecord: '2011-01-01T07:00:00',
-					dayInfo: '+w3',
-				},
-				{
-					timeRecord: '2011-01-01T07:00:00',
-					dayInfo: '-w4',
-				},
-				{
-					timeRecord: '2022-01-01T22:00:00',
-					dayInfo: '',
-				},
-			];
+		const responses = [
+			{
+				timeRecord: '2011-01-01T07:00:00',
+				dayInfo: '',
+			},
+			{
+				timeRecord: '2011-01-01T07:00:00',
+				dayInfo: '+w3',
+			},
+			{
+				timeRecord: '2011-01-01T07:00:00',
+				dayInfo: '-w4',
+			},
+			{
+				timeRecord: '2022-01-01T22:00:00',
+				dayInfo: '',
+			},
+		];
 
-			for (let i = 0; i < testingStrings.length; i += 1) {
-				const { timeRecord, dayInfo } = extractDayInfo(testingStrings[i]);
+		testingStrings.forEach((str, i) => {
+			it(`should parse '${str}' correctly`, () => {
+				const { timeRecord, dayInfo } = extractDayInfo(str);
 				expect(timeRecord).to.be.equal(responses[i].timeRecord);
 				expect(dayInfo).to.be.equal(responses[i].dayInfo);
-			}
+			});
 		});
 	});
 
 	describe('Playlist tools component findDuration', () => {
-		it('Should find duration in nested object', async () => {
-			const testingObjects = [
-				{
-					seq: {
-						begin: 'trigger3',
-						dur: 'duration',
-						video6: {
-							src: 'https://demo.signageos.io/smil/zones/files/video_3.mp4',
-							id: 'annons1',
-							fit: 'hidden',
-							region: 'video',
-							param: { name: 'cacheControl', value: 'auto' },
-						},
+		const testingObjects = [
+			{
+				seq: {
+					begin: 'trigger3',
+					dur: 'duration',
+					video6: {
+						src: 'https://demo.signageos.io/smil/zones/files/video_3.mp4',
+						id: 'annons1',
+						fit: 'hidden',
+						region: 'video',
+						param: { name: 'cacheControl', value: 'auto' },
 					},
 				},
-				{
-					par: {
-						begin: 'trigger3',
-						dur: '11s',
-						video6: {
-							src: 'https://demo.signageos.io/smil/zones/files/video_3.mp4',
-							id: 'annons1',
-							fit: 'hidden',
-							region: 'video',
-							param: { name: 'cacheControl', value: 'auto' },
-						},
+			},
+			{
+				par: {
+					begin: 'trigger3',
+					dur: '11s',
+					video6: {
+						src: 'https://demo.signageos.io/smil/zones/files/video_3.mp4',
+						id: 'annons1',
+						fit: 'hidden',
+						region: 'video',
+						param: { name: 'cacheControl', value: 'auto' },
 					},
 				},
-				{
-					excl: {
-						priorityClass: {
-							seq: {
-								begin: 'trigger3',
-								dur: '888',
-								video6: {
-									src: 'https://demo.signageos.io/smil/zones/files/video_3.mp4',
-									id: 'annons1',
-									fit: 'hidden',
-									region: 'video',
-									param: { name: 'cacheControl', value: 'auto' },
-								},
+			},
+			{
+				excl: {
+					priorityClass: {
+						seq: {
+							begin: 'trigger3',
+							dur: '888',
+							video6: {
+								src: 'https://demo.signageos.io/smil/zones/files/video_3.mp4',
+								id: 'annons1',
+								fit: 'hidden',
+								region: 'video',
+								param: { name: 'cacheControl', value: 'auto' },
 							},
 						},
 					},
 				},
-				{
-					excl: {
-						priorityClass: {
-							peer: 'none',
-							par: {
-								begin: 'trigger3',
-								video6: {
-									src: 'https://demo.signageos.io/smil/zones/files/video_3.mp4',
-									id: 'annons1',
-									fit: 'hidden',
-									region: 'video',
-									param: { name: 'cacheControl', value: 'auto' },
-								},
+			},
+			{
+				excl: {
+					priorityClass: {
+						peer: 'none',
+						par: {
+							begin: 'trigger3',
+							video6: {
+								src: 'https://demo.signageos.io/smil/zones/files/video_3.mp4',
+								id: 'annons1',
+								fit: 'hidden',
+								region: 'video',
+								param: { name: 'cacheControl', value: 'auto' },
 							},
 						},
 					},
+				},
+			},
+		];
+
+		const expectedDurations = ['duration', '11s', '888', undefined];
+
+		testingObjects.forEach((obj, i) => {
+			it(`should return '${expectedDurations[i]}' for test object ${i}`, () => {
+				const duration = findDuration(obj);
+				expect(duration).to.be.equal(expectedDurations[i]);
+			});
+		});
+	});
+
+	describe('removeLastArrayItem', () => {
+		it('should remove last item from array', () => {
+			expect(removeLastArrayItem([1, 2, 3])).to.eql([1, 2]);
+		});
+
+		it('should return empty array for single-element array', () => {
+			expect(removeLastArrayItem([1])).to.eql([]);
+		});
+
+		it('should return empty array for empty array', () => {
+			expect(removeLastArrayItem([])).to.eql([]);
+		});
+	});
+
+	describe('removeDigits', () => {
+		it('should remove digits from string', () => {
+			expect(removeDigits('img123')).to.be.equal('img');
+		});
+
+		it('should return same string without digits', () => {
+			expect(removeDigits('video')).to.be.equal('video');
+		});
+
+		it('should return empty string for all-digit string', () => {
+			expect(removeDigits('12345')).to.be.equal('');
+		});
+	});
+
+	describe('removeWhitespace', () => {
+		it('should remove spaces from string', () => {
+			expect(removeWhitespace('hello world')).to.be.equal('helloworld');
+		});
+
+		it('should remove tabs and newlines', () => {
+			expect(removeWhitespace('hello\t\nworld')).to.be.equal('helloworld');
+		});
+
+		it('should return same string without whitespace', () => {
+			expect(removeWhitespace('helloworld')).to.be.equal('helloworld');
+		});
+	});
+
+	describe('generateElementId', () => {
+		it('should generate element id from filepath, region, and key', () => {
+			const result = generateElementId('https://example.com/video.mp4', 'main', 'video');
+			expect(result).to.include('main');
+			expect(result).to.include('video');
+		});
+
+		it('should generate different ids for different regions', () => {
+			const id1 = generateElementId('https://example.com/video.mp4', 'main', 'video');
+			const id2 = generateElementId('https://example.com/video.mp4', 'sidebar', 'video');
+			expect(id1).to.not.be.equal(id2);
+		});
+	});
+
+	describe('checkSlowDevice', () => {
+		it('should return true for Raspberry device', () => {
+			expect(checkSlowDevice('RaspberryPi4')).to.be.equal(true);
+		});
+
+		it('should return true for LGE-55SM5C-BF-1 device', () => {
+			expect(checkSlowDevice('LGE-55SM5C-BF-1-extra')).to.be.equal(true);
+		});
+
+		it('should return false for unknown device', () => {
+			expect(checkSlowDevice('Samsung-Display')).to.be.equal(false);
+		});
+
+		it('should return false for empty string', () => {
+			expect(checkSlowDevice('')).to.be.equal(false);
+		});
+	});
+
+	describe('computeSyncIndex', () => {
+		it('should initialize and increment sync index for new region', () => {
+			const result = computeSyncIndex({}, 'main');
+			expect(result.main).to.be.equal(1);
+		});
+
+		it('should increment existing sync index', () => {
+			const syncIndex = { main: 3 };
+			const result = computeSyncIndex(syncIndex, 'main');
+			expect(result.main).to.be.equal(4);
+		});
+
+		it('should track independent indexes for different regions', () => {
+			const syncIndex: { [key: string]: number } = {};
+			computeSyncIndex(syncIndex, 'main');
+			computeSyncIndex(syncIndex, 'main');
+			computeSyncIndex(syncIndex, 'sidebar');
+			expect(syncIndex.main).to.be.equal(2);
+			expect(syncIndex.sidebar).to.be.equal(1);
+		});
+	});
+
+	describe('generateBackupImagePlaylist', () => {
+		it('should generate correct backup playlist structure', () => {
+			const result = generateBackupImagePlaylist('https://example.com/backup.jpg', '5');
+			expect(result.seq.repeatCount).to.be.equal('5');
+			expect(result.seq.img.src).to.be.equal('https://example.com/backup.jpg');
+			expect(result.seq.img.dur).to.be.equal('10');
+			expect(result.seq.img.localFilePath).to.be.equal('');
+		});
+	});
+
+	describe('getDefaultVideoParams', () => {
+		it('should return correct default video params', () => {
+			const result = getDefaultVideoParams();
+			expect(result).to.eql(['', 0, 0, 0, 0, 'RTP']);
+		});
+	});
+
+	describe('orderJsonObject', () => {
+		it('should sort object keys alphabetically', () => {
+			const result = orderJsonObject({ c: 3, a: 1, b: 2 });
+			expect(Object.keys(result)).to.eql(['a', 'b', 'c']);
+		});
+
+		it('should preserve values', () => {
+			const result = orderJsonObject({ z: 'last', a: 'first' });
+			expect(result.a).to.be.equal('first');
+			expect(result.z).to.be.equal('last');
+		});
+	});
+
+	describe('removeNestedProperties', () => {
+		it('should remove specified properties from object', () => {
+			const obj = { keep: 'yes', remove: 'no', also: 'keep' } as unknown as PlaylistElement;
+			removeNestedProperties(obj, ['remove']);
+			expect(obj).to.not.have.property('remove');
+			expect(obj).to.have.property('keep');
+		});
+
+		it('should remove nested properties', () => {
+			const obj = {
+				seq: {
+					keep: 'yes',
+					player: 'remove',
+				},
+			} as unknown as PlaylistElement;
+			removeNestedProperties(obj, ['player']);
+			expect((obj as any).seq).to.not.have.property('player');
+			expect((obj as any).seq).to.have.property('keep');
+		});
+	});
+
+	describe('getConfigString', () => {
+		it('should return string value from config', () => {
+			expect(getConfigString({ key: 'value' }, 'key')).to.be.equal('value');
+		});
+
+		it('should return undefined for non-string value', () => {
+			expect(getConfigString({ key: 123 }, 'key')).to.be.equal(undefined);
+		});
+
+		it('should return undefined for missing key', () => {
+			expect(getConfigString({ other: 'value' }, 'key')).to.be.equal(undefined);
+		});
+
+		it('should return undefined for undefined config', () => {
+			expect(getConfigString(undefined, 'key')).to.be.equal(undefined);
+		});
+	});
+
+	describe('getConfigBoolean', () => {
+		it('should return boolean true from config', () => {
+			expect(getConfigBoolean({ key: true }, 'key')).to.be.equal(true);
+		});
+
+		it('should return boolean false from config', () => {
+			expect(getConfigBoolean({ key: false }, 'key')).to.be.equal(false);
+		});
+
+		it('should parse string "true"', () => {
+			expect(getConfigBoolean({ key: 'true' }, 'key')).to.be.equal(true);
+		});
+
+		it('should parse string "TRUE"', () => {
+			expect(getConfigBoolean({ key: 'TRUE' }, 'key')).to.be.equal(true);
+		});
+
+		it('should parse string "false"', () => {
+			expect(getConfigBoolean({ key: 'false' }, 'key')).to.be.equal(false);
+		});
+
+		it('should return default for missing key', () => {
+			expect(getConfigBoolean({ other: true }, 'key')).to.be.equal(false);
+		});
+
+		it('should return custom default for missing key', () => {
+			expect(getConfigBoolean({ other: true }, 'key', true)).to.be.equal(true);
+		});
+
+		it('should return default for undefined config', () => {
+			expect(getConfigBoolean(undefined, 'key')).to.be.equal(false);
+		});
+
+		it('should return default for numeric value', () => {
+			expect(getConfigBoolean({ key: 1 }, 'key')).to.be.equal(false);
+		});
+	});
+
+	describe('getNextElementToPlay', () => {
+		it('should pick first playable element on first call', () => {
+			const playlist = {
+				playMode: 'one',
+				img: { src: 'image1.jpg' },
+				video: { src: 'video1.mp4' },
+			};
+			const randomPlaylistInfo = {};
+			const result = getNextElementToPlay(playlist, randomPlaylistInfo, 'parent1');
+			const keys = Object.keys(result).filter((k) => k !== 'playMode');
+			expect(keys.length).to.be.equal(1);
+		});
+
+		it('should cycle through elements on subsequent calls', () => {
+			const playlist = {
+				playMode: 'one',
+				img: { src: 'image1.jpg' },
+				video: { src: 'video1.mp4' },
+			};
+			const randomPlaylistInfo = {};
+			const result1 = getNextElementToPlay(playlist, randomPlaylistInfo, 'parent1');
+			const result2 = getNextElementToPlay(playlist, randomPlaylistInfo, 'parent1');
+			const keys1 = Object.keys(result1).filter((k) => k !== 'playMode');
+			const keys2 = Object.keys(result2).filter((k) => k !== 'playMode');
+			expect(keys1[0]).to.be.equal('img');
+			expect(keys2[0]).to.be.equal('video');
+			expect(keys1[0]).to.not.be.equal(keys2[0]);
+		});
+
+		it('should initialize randomPlaylistInfo for new parent', () => {
+			const randomPlaylistInfo = {};
+			getNextElementToPlay({ img: { src: 'a.jpg' } }, randomPlaylistInfo, 'newParent');
+			expect(randomPlaylistInfo).to.have.property('newParent');
+		});
+	});
+
+	describe('processRandomPlayMode', () => {
+		it('should return shuffled object for random mode', () => {
+			const playlist = { playMode: 'random', img: { src: 'a.jpg' }, video: { src: 'b.mp4' } };
+			const result = processRandomPlayMode(playlist as any, {}, 'parent1');
+			expect(result).to.have.property('img');
+			expect(result).to.have.property('video');
+		});
+
+		it('should return single element for random_one mode', () => {
+			const playlist = { playMode: 'random_one', img: { src: 'a.jpg' }, video: { src: 'b.mp4' } };
+			const result = processRandomPlayMode(playlist as any, {}, 'parent1');
+			const playableKeys = Object.keys(result).filter((k) => k !== 'playMode');
+			expect(playableKeys.length).to.be.equal(1);
+		});
+
+		it('should return single element for one mode', () => {
+			const playlist = { playMode: 'one', img: { src: 'a.jpg' }, video: { src: 'b.mp4' } };
+			const result = processRandomPlayMode(playlist as any, {}, 'parent1');
+			const playableKeys = Object.keys(result).filter((k) => k !== 'playMode');
+			expect(playableKeys.length).to.be.equal(1);
+		});
+
+		it('should return original playlist for unsupported playMode', () => {
+			const playlist = { playMode: 'unknown', img: { src: 'a.jpg' } };
+			const result = processRandomPlayMode(playlist as any, {}, 'parent1');
+			expect(result).to.eql(playlist);
+		});
+
+		it('should be case-insensitive for playMode', () => {
+			const playlist = { playMode: 'RANDOM', img: { src: 'a.jpg' }, video: { src: 'b.mp4' } };
+			const result = processRandomPlayMode(playlist as any, {}, 'parent1');
+			expect(result).to.have.property('img');
+			expect(result).to.have.property('video');
+		});
+	});
+
+	describe('getNextElementToPlay nested-array handling', () => {
+		it('should pick one child per call when playable children are an array under a single key', () => {
+			const playlist = {
+				playMode: 'one',
+				seq: [
+					{ video: { src: 'a.mp4' } },
+					{ img: { src: 'b.jpg' } },
+					{ img: { src: 'c.jpg' } },
+				],
+			};
+			const info = {};
+			const r0 = getNextElementToPlay(playlist, info, 'parent1') as any;
+			const r1 = getNextElementToPlay(playlist, info, 'parent1') as any;
+			const r2 = getNextElementToPlay(playlist, info, 'parent1') as any;
+
+			expect(r0.seq).to.deep.equal([{ video: { src: 'a.mp4' } }]);
+			expect(r1.seq).to.deep.equal([{ img: { src: 'b.jpg' } }]);
+			expect(r2.seq).to.deep.equal([{ img: { src: 'c.jpg' } }]);
+		});
+
+		it('should wrap around after reaching the end of the array', () => {
+			const playlist = {
+				playMode: 'one',
+				seq: [{ video: { src: 'a.mp4' } }, { img: { src: 'b.jpg' } }],
+			};
+			const info = {};
+			getNextElementToPlay(playlist, info, 'parent1');
+			getNextElementToPlay(playlist, info, 'parent1');
+			const r3 = getNextElementToPlay(playlist, info, 'parent1') as any;
+			expect(r3.seq).to.deep.equal([{ video: { src: 'a.mp4' } }]);
+		});
+
+		it('should cycle across mixed array-key + scalar-playable-key children in declaration order', () => {
+			const playlist = {
+				playMode: 'one',
+				seq: [{ img: { src: 'a.jpg' } }, { img: { src: 'b.jpg' } }],
+				video0: { src: 'c.mp4' },
+			};
+			const info = {};
+			const r0 = getNextElementToPlay(playlist, info, 'parent1') as any;
+			const r1 = getNextElementToPlay(playlist, info, 'parent1') as any;
+			const r2 = getNextElementToPlay(playlist, info, 'parent1') as any;
+			const r3 = getNextElementToPlay(playlist, info, 'parent1') as any;
+
+			expect(r0).to.not.have.property('video0');
+			expect(r0.seq).to.deep.equal([{ img: { src: 'a.jpg' } }]);
+
+			expect(r1).to.not.have.property('video0');
+			expect(r1.seq).to.deep.equal([{ img: { src: 'b.jpg' } }]);
+
+			expect(r2).to.not.have.property('seq');
+			expect(r2.video0).to.deep.equal({ src: 'c.mp4' });
+
+			expect(r3).to.not.have.property('video0');
+			expect(r3.seq).to.deep.equal([{ img: { src: 'a.jpg' } }]);
+		});
+
+		it('should return the playlist unchanged when there are no playable children', () => {
+			const playlist = { playMode: 'one' };
+			const info = {};
+			const result = getNextElementToPlay(playlist, info, 'parent1');
+			expect(result).to.deep.equal({ playMode: 'one' });
+		});
+	});
+
+	describe('findFirstMediaDescendant', () => {
+		it('should return regionName + syncIndex from a direct leaf media child', () => {
+			const node = {
+				playMode: 'one',
+				video0: { src: 'a.mp4', regionInfo: { regionName: 'main' }, syncIndex: 2 },
+				img1: { src: 'b.jpg', regionInfo: { regionName: 'main' }, syncIndex: 3 },
+			};
+			expect(findFirstMediaDescendant(node)).to.deep.equal({ regionName: 'main', syncIndex: 2 });
+		});
+
+		it('should walk into an array-valued structure-tag child (nested seq case)', () => {
+			const node = {
+				playMode: 'one',
+				seq: [
+					{ video0: { src: 'a.mp4', regionInfo: { regionName: 'main' }, syncIndex: 2 } },
+					{ img1: { src: 'b.jpg', regionInfo: { regionName: 'main' }, syncIndex: 3 } },
+				],
+			};
+			expect(findFirstMediaDescendant(node)).to.deep.equal({ regionName: 'main', syncIndex: 2 });
+		});
+
+		it('should walk past an empty wrapper to reach the first leaf', () => {
+			const node = {
+				seq: [
+					{},
+					{ video0: { src: 'a.mp4', regionInfo: { regionName: 'side' }, syncIndex: 5 } },
+				],
+			};
+			expect(findFirstMediaDescendant(node)).to.deep.equal({ regionName: 'side', syncIndex: 5 });
+		});
+
+		it('should return undefined when no media descendant exists', () => {
+			expect(findFirstMediaDescendant({ playMode: 'one' })).to.equal(undefined);
+			expect(findFirstMediaDescendant(undefined as any)).to.equal(undefined);
+			expect(findFirstMediaDescendant({ seq: [{}] })).to.equal(undefined);
+		});
+
+		it('should skip non-playable keys when searching for a leaf', () => {
+			const node = {
+				begin: 'wallclock(2025-01-01)',
+				end: 'wallclock(2026-01-01)',
+				video0: { src: 'a.mp4', regionInfo: { regionName: 'main' }, syncIndex: 7 },
+			};
+			expect(findFirstMediaDescendant(node)).to.deep.equal({ regionName: 'main', syncIndex: 7 });
+		});
+	});
+
+	describe('pickRandomOne nested-array handling', () => {
+		// Math.floor(0.5 * N) picks the middle index deterministically.
+		let origRandom: () => number;
+		beforeEach(() => { origRandom = Math.random; Math.random = () => 0.5; });
+		afterEach(() => { Math.random = origRandom; });
+
+		it('should return exactly one item when playable children are an array under a single key', () => {
+			const playlist = {
+				playMode: 'random_one',
+				seq: [
+					{ video: { src: 'a.mp4' } },
+					{ img: { src: 'b.jpg' } },
+					{ img: { src: 'c.jpg' } },
+				],
+			};
+			const result = pickRandomOne(playlist) as any;
+			// Picked index = floor(0.5 * 3) = 1 → the middle element. Assert the
+			// returned array contains exactly that one element, NOT the other two.
+			expect(result.seq).to.deep.equal([{ img: { src: 'b.jpg' } }]);
+		});
+
+		it('should preserve non-playable sibling keys (playMode, begin, etc.)', () => {
+			const playlist = {
+				playMode: 'random_one',
+				begin: 'wallclock(2025-01-01)',
+				seq: [{ video: { src: 'a.mp4' } }, { img: { src: 'b.jpg' } }],
+			};
+			const result = pickRandomOne(playlist) as any;
+			expect(result.playMode).to.be.equal('random_one');
+			expect(result.begin).to.be.equal('wallclock(2025-01-01)');
+			expect(result.seq).to.have.length(1);
+		});
+
+		it('should return the single item when the array has only one entry', () => {
+			const playlist = {
+				playMode: 'random_one',
+				seq: [{ video: { src: 'only.mp4' } }],
+			};
+			const result = pickRandomOne(playlist) as any;
+			expect(result.seq).to.deep.equal([{ video: { src: 'only.mp4' } }]);
+		});
+
+		it('should preserve existing flat-keys behavior (picks one distinct key)', () => {
+			const playlist = {
+				playMode: 'random_one',
+				img0: { src: 'a.jpg' },
+				video1: { src: 'b.mp4' },
+				img2: { src: 'c.jpg' },
+			};
+			const result = pickRandomOne(playlist) as any;
+			// Picked index = floor(0.5 * 3) = 1 → 'video1'
+			const keys = Object.keys(result).filter((k) => k !== 'playMode');
+			expect(keys).to.deep.equal(['video1']);
+			expect(result.video1).to.deep.equal({ src: 'b.mp4' });
+		});
+	});
+
+	// Edge cases for the random-play helpers — roadmap 3C. Document the
+	// degenerate behaviours so a future "fix" is a deliberate choice
+	// (the test fails loudly) rather than an accidental drift.
+	describe('pickRandomOne degenerate inputs [3C]', () => {
+		let origRandom: () => number;
+		beforeEach(() => { origRandom = Math.random; Math.random = () => 0.5; });
+		afterEach(() => { Math.random = origRandom; });
+
+		it('returns the input unchanged when no playable parts are present', () => {
+			// `playMode` and `begin` do not match
+			// randomPlaylistPlayableTagsRegex (img|video|ref|ticker|par|seq|exl|priorityClass).
+			// playableParts is empty → picked === undefined → omit drops nothing.
+			const playlist = { playMode: 'random_one', begin: 'wallclock(2025-01-01)' };
+			const result = pickRandomOne(playlist) as any;
+			expect(result).to.deep.equal({ playMode: 'random_one', begin: 'wallclock(2025-01-01)' });
+		});
+
+		it('returns a single-undefined-element array for an empty playable array', () => {
+			// Documents the current degenerate behaviour: arr[Math.floor(0.5*0)]
+			// is arr[0] === undefined, so the picked key gets [undefined]. A
+			// future hardening (skip empty arrays, return original input, etc.)
+			// should update this assertion deliberately.
+			const playlist = { playMode: 'random_one', seq: [] as unknown[] };
+			const result = pickRandomOne(playlist) as any;
+			expect(result.playMode).to.equal('random_one');
+			expect(result.seq).to.deep.equal([undefined]);
+		});
+	});
+
+	describe('shuffleObject [3C]', () => {
+		let origRandom: () => number;
+		// Stub Math.random=0.5 → comparator always returns 0 → stable sort
+		// preserves insertion order. Lets us assert deterministic shape
+		// without coupling to engine sort details.
+		beforeEach(() => { origRandom = Math.random; Math.random = () => 0.5; });
+		afterEach(() => { Math.random = origRandom; });
+
+		it('returns an empty object for empty input', () => {
+			expect(shuffleObject({})).to.deep.equal({});
+		});
+
+		it('returns a single-key object unchanged', () => {
+			expect(shuffleObject({ only: 1 })).to.deep.equal({ only: 1 });
+		});
+
+		it('preserves every key/value mapping for multi-key input', () => {
+			const input = { a: 1, b: 'two', c: { nested: true } };
+			const result = shuffleObject(input);
+			expect(Object.keys(result).sort()).to.deep.equal(['a', 'b', 'c']);
+			expect(result.a).to.equal(1);
+			expect(result.b).to.equal('two');
+			expect(result.c).to.deep.equal({ nested: true });
+		});
+
+		it('returns a new object (does not mutate input reference)', () => {
+			const input = { a: 1, b: 2 };
+			const result = shuffleObject(input);
+			expect(result).to.not.equal(input);
+		});
+
+		it('aliases nested-value references rather than deep-cloning them', () => {
+			// shuffleObject is a shallow copy (only the outer dict is new).
+			// Mutating a nested object via the result IS visible in the input.
+			// Documents current behaviour so a future deep-clone change is a
+			// deliberate choice.
+			const nested = { count: 0 };
+			const input = { item: nested };
+			const result = shuffleObject(input) as any;
+			result.item.count = 7;
+			expect(nested.count).to.equal(7);
+		});
+	});
+
+	describe('computePlayModeSyncRanges', () => {
+		it('should record a single-region delta as one range', () => {
+			const before = { main: 1 };
+			const after = { main: 4 };
+			expect(computePlayModeSyncRanges(before, after)).to.deep.equal({
+				main: { start: 2, end: 4 },
+			});
+		});
+
+		it('should record separate ranges per region when multiple regions advance', () => {
+			const before = { main: 1, side: 5 };
+			const after = { main: 3, side: 8 };
+			expect(computePlayModeSyncRanges(before, after)).to.deep.equal({
+				main: { start: 2, end: 3 },
+				side: { start: 6, end: 8 },
+			});
+		});
+
+		it('should skip regions with no index advance', () => {
+			const before = { main: 4, side: 2 };
+			const after = { main: 4, side: 5 };
+			expect(computePlayModeSyncRanges(before, after)).to.deep.equal({
+				side: { start: 3, end: 5 },
+			});
+		});
+
+		it('should treat a region absent from the before snapshot as starting at 0', () => {
+			const before = { main: 2 };
+			const after = { main: 2, side: 3 };
+			expect(computePlayModeSyncRanges(before, after)).to.deep.equal({
+				side: { start: 1, end: 3 },
+			});
+		});
+
+		it('should return an empty object when nothing advanced', () => {
+			expect(computePlayModeSyncRanges({ main: 4 }, { main: 4 })).to.deep.equal({});
+			expect(computePlayModeSyncRanges({}, {})).to.deep.equal({});
+		});
+	});
+
+	describe('areAllWallclocksPermanentlyExpired', () => {
+		it('should return true when all elements have expired one-time wallclocks', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2020-06-01T12:00)',
+				},
+				{
+					begin: 'wallclock(2021-03-01T08:00)',
+					end: 'wallclock(2021-12-01T18:00)',
 				},
 			];
+			expect(areAllWallclocksPermanentlyExpired(elements as PlaylistElement[])).to.be.equal(true);
+		});
 
-			const responses = ['duration', '11s', '888', undefined];
+		it('should return false when mix of expired and future wallclocks', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2020-06-01T12:00)',
+				},
+				{
+					begin: 'wallclock(2030-01-01T09:00)',
+					end: 'wallclock(2030-12-01T18:00)',
+				},
+			];
+			expect(areAllWallclocksPermanentlyExpired(elements as PlaylistElement[])).to.be.equal(false);
+		});
 
-			for (let i = 0; i < testingObjects.length; i += 1) {
-				const duration = findDuration(testingObjects[i]);
-				expect(duration).to.be.equal(responses[i]);
-			}
+		it('should return false when element has no wallclock begin', () => {
+			const elements = [
+				{
+					dur: '5s',
+					img: { src: 'test.jpg' },
+				},
+			];
+			expect(areAllWallclocksPermanentlyExpired(elements as PlaylistElement[])).to.be.equal(false);
+		});
+
+		it('should return false for empty array', () => {
+			expect(areAllWallclocksPermanentlyExpired([])).to.be.equal(false);
+		});
+
+		it('should return false for recurring wallclock (P1D)', () => {
+			const elements = [
+				{
+					begin: 'wallclock(R/2020-01-01T09:00/P1D)',
+					end: 'wallclock(R/2020-01-01T18:00/P1D)',
+				},
+			];
+			expect(areAllWallclocksPermanentlyExpired(elements as PlaylistElement[])).to.be.equal(false);
+		});
+
+		it('should return true for single expired one-time wallclock', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2020-06-01T12:00)',
+				},
+			];
+			expect(areAllWallclocksPermanentlyExpired(elements as PlaylistElement[])).to.be.equal(true);
+		});
+
+		it('should return false for mix of expired one-time and recurring wallclocks', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2020-06-01T12:00)',
+				},
+				{
+					begin: 'wallclock(R/2020-01-01T09:00/P1D)',
+					end: 'wallclock(R/2020-01-01T18:00/P1D)',
+				},
+			];
+			expect(areAllWallclocksPermanentlyExpired(elements as PlaylistElement[])).to.be.equal(false);
+		});
+
+		it('should return false when one element lacks wallclock begin among expired ones', () => {
+			const elements = [
+				{
+					begin: 'wallclock(2020-01-01T09:00)',
+					end: 'wallclock(2020-06-01T12:00)',
+				},
+				{
+					dur: '5s',
+					img: { src: 'test.jpg' },
+				},
+			];
+			expect(areAllWallclocksPermanentlyExpired(elements as PlaylistElement[])).to.be.equal(false);
 		});
 	});
 });

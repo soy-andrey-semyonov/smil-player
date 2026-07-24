@@ -1,0 +1,78 @@
+<smil>
+    <head>
+        <meta http-equiv="Refresh" content="444"/>
+        <meta defaultRepeatCount="indefinite"/>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#FFFFFF"/>
+            <region regionName="video" left="0" top="0" width="1280" height="720" z-index="1" backgroundColor="#FFFFFF"
+                    mediaAlign="topLeft"/>
+        </layout>
+    </head>
+
+    <body systemComponent="http://www.w3.org/1999/xhtml" style="background-color:#FFFFFF">
+
+        <par>
+            <seq end="__prefetchEnd.endEvent">
+                <seq repeatCount="indefinite">
+                    <video src="https://demo.signageos.io/smil/samples/assets/loader.mp4"/>
+                </seq>
+            </seq>
+
+            <par begin="__prefetchEnd.endEvent" repeatCount="indefinite">
+                <!-- Regression fixture for the "stuck on last gallery element" deadlock.
+                     Mirrors the production GalleryModule shape that froze both devices:
+                     - higher priorityClass whose wallclock window is far in the future
+                       (inactive, like the customer's campaign before its window opened)
+                     - lower priorityClass with NO peer attribute (defaults to peer=never)
+                       whose gallery seq is video-img-video: playing the img writes
+                       wasUpdated onto the parsed tree, and the video-first order makes
+                       the timesPlayed credit land on a mid-seq slot instance.
+                     Pre-fix, cycle 2's first video registered under a drifted parent
+                     hash, peer-never-blocked on cycle 1's last video (whose slot was
+                     never released), and playback froze after one gallery cycle. -->
+                <excl>
+                    <par>
+                        <seq repeatCount="indefinite">
+                            <priorityClass>
+                                <seq repeatCount="indefinite">
+                                    <seq repeatCount="1" begin="wallclock(2030-01-01T00:00)" end="wallclock(2030-01-02T00:00)">
+                                        <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                    </seq>
+                                </seq>
+                            </priorityClass>
+                            <priorityClass higher="pause" pauseDisplay="hide">
+                                <seq repeatCount="indefinite">
+                                    <!-- gallery: video, img, video — plays once per cycle -->
+                                    <seq repeatCount="1">
+                                        <video src="https://static.signageos.io/assets/video-test-1_e07fc21a7a72e3d33478243bd75d7743.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                        <img src="https://demo.signageos.io/smil/zones/files/img_1.jpg"
+                                             dur="3s" fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </img>
+                                        <video src="https://static.signageos.io/assets/video-test-2_e2ffa51f6a4473b815f39e7fb39239da.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                    </seq>
+                                    <!-- expired sibling campaign (mirrors customer playlist) -->
+                                    <seq repeatCount="1" begin="wallclock(2020-01-01T00:00)" end="wallclock(2020-01-02T00:00)">
+                                        <img src="https://demo.signageos.io/smil/zones/files/img_2.jpg"
+                                             dur="3s" fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </img>
+                                    </seq>
+                                </seq>
+                            </priorityClass>
+                        </seq>
+                    </par>
+                </excl>
+            </par>
+        </par>
+    </body>
+</smil>

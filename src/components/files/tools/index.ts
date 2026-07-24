@@ -5,7 +5,7 @@ import * as URLVar from 'url';
 import { corsAnywhere } from '../../../../config/parameters';
 import { MediaInfoObject, MergedDownloadList } from '../../../models/filesModels';
 import { CustomEndpointReport, ItemType } from '../../../models/reportingModels';
-import { checksumString } from './checksum';
+import { getFileName, getStorageFileName } from './fileName';
 import {
 	DEFAULT_LAST_MODIFIED,
 	FileStructure,
@@ -20,6 +20,16 @@ import { removeLastArrayItem } from '../../playlist/tools/generalTools';
 import moment from 'moment';
 
 export const debug = Debug('@signageos/smil-player:filesManager');
+
+const isUrl = require('is-url-superb');
+
+/**
+ * Extracts a valid URL string from updateValue, returns undefined if not a valid URL.
+ * Used for passing explicit reportUrl to sendDownloadReport.
+ */
+export function getReportUrlFromUpdateValue(updateValue: string | number | undefined): string | undefined {
+	return typeof updateValue === 'string' && isUrl(updateValue) ? updateValue : undefined;
+}
 
 export function getRandomInt(max: number) {
 	return Math.floor(Math.random() * Math.floor(max));
@@ -36,27 +46,33 @@ export function getProtocol(url: string): string {
 	return protocol;
 }
 
-export function getFileName(url: string) {
-	if (!url) {
-		return url;
-	}
-	const parsedUrl = URLVar.parse(url);
-	const filePathChecksum = parsedUrl.host
-		? `_${checksumString(parsedUrl.host + parsedUrl.pathname + JSON.stringify(parsedUrl.query), 8)}`
-		: '';
-	const fileName = path.basename(parsedUrl.pathname ?? url);
-	const sanitizedExtname = path
-		.extname(parsedUrl.pathname ?? url)
-		.replace(/[^\w\.\-]+/gi, '')
-		.substr(0, 10);
-	const sanitizedFileName = decodeURIComponent(fileName.substr(0, fileName.length - sanitizedExtname.length))
-		.replace(/[^\w\.\-]+/gi, '-')
-		.substr(0, 10);
-	return `${sanitizedFileName}${filePathChecksum}${sanitizedExtname}`;
-}
+export { getFileName, getStorageFileName };
 
 export function getPath(filePath: string) {
 	return path.dirname(filePath);
+}
+
+/**
+ * Get URL without query parameters for comparison purposes.
+ * Used for deduplication and grouping to treat URLs with different query params
+ * (like campaign definitions) as the same content.
+ * @param url - The URL to strip query params from (can be null)
+ * @returns URL without query parameters, or original value if not a valid URL
+ */
+export function getUrlWithoutQueryParams(url: string | number | null | undefined): string {
+	if (url === null || url === undefined) {
+		return '';
+	}
+	if (typeof url !== 'string') {
+		return String(url);
+	}
+	try {
+		const parsedUrl = new URL(url);
+		return `${parsedUrl.origin}${parsedUrl.pathname}`;
+	} catch {
+		// If URL parsing fails, try simple split (handles relative URLs)
+		return url.split('?')[0];
+	}
 }
 
 export function createDownloadPath(sourceUrl: string): string {
@@ -80,6 +96,14 @@ export function createVersionedUrl(
 	const urlWithoutSearch = sourceUrl.substr(0, sourceUrl.length - searchLength);
 	// do not generate unique query string __smil_version for websites
 	if (isWidget && !isLocalFileWidget(sourceUrl)) {
+		return urlWithoutSearch;
+	}
+	// Tizen AVPlayer rejects any query string on file:// URIs with
+	// PLAYER_ERROR_INVALID_URI, so we cannot use __smil_version as an HTTP-style
+	// cache-buster here. Callers (rePrepareUpdatedVideo) already stop the stale
+	// player before prepare, which frees the pool slot and forces a fresh player
+	// instance — URI-level versioning is redundant for local files.
+	if (sourceUrl.startsWith('file://')) {
 		return urlWithoutSearch;
 	}
 	parsedUrl.query.__smil_version = generateSmilUrlVersion(playlistVersion, smilUrlVersion, wasUpdated);
@@ -126,8 +150,73 @@ export function copyQueryParameters(fromUrl: string, toUrl: string) {
 	return toUrlWithoutSearch + '?' + querystring.encode(parsedToUrl.query);
 }
 
-export function createLocalFilePath(localFilePath: string, src: string): string {
-	return `${localFilePath}/${getFileName(src)}`;
+export function createLocalFilePath(localFilePath: string, src: string, fallbackUrlForExt?: string): string {
+	return `${localFilePath}/${getFileName(src, fallbackUrlForExt)}`;
+}
+
+/**
+ * Resolve the canonical filename key for `srcUrl` against `mediaInfoObject`.
+ *
+ * The location-header strategy may produce URLs whose pathname has no extension
+ * (e.g. ".../content"). We still want the on-disk filename (and the in-memory
+ * key) to include the resolved extension from the Location header. Callers that
+ * already hold the resolved Location URL should call `getFileName(srcUrl, locationUrl)`
+ * directly. Callers that only have `srcUrl` plus the persisted `mediaInfoObject`
+ * use this helper: it returns the canonical key already present in the map
+ * (which carries the extension) when one exists, falling back to the bare
+ * `getFileName(srcUrl)` for brand-new entries that haven't been committed yet.
+ */
+export function getCanonicalFileName(srcUrl: string, mediaInfoObject: MediaInfoObject): string {
+	const baseKey = getFileName(srcUrl);
+	// Fast path: the URL pathname already carried its own extension, so baseKey
+	// IS the canonical key. Gate on the extension itself — NOT on the key being
+	// present in the map. A present-but-extensionless baseKey may be a stale
+	// pre-extension-borrowing entry that is now shadowed by an extensionful
+	// sibling; resolving to it would pin reports to a frozen Location URL.
+	if (path.extname(baseKey)) {
+		return baseKey;
+	}
+	// Slow path: scan for a previously-committed entry whose key starts with
+	// `baseKey.` — that's the extensionful canonical name we wrote last time.
+	const prefix = baseKey + '.';
+	for (const key of Object.keys(mediaInfoObject)) {
+		if (key.startsWith(prefix)) {
+			return key;
+		}
+	}
+	// No prior entry — caller should pass a fallback once it has one (from HEAD).
+	return baseKey;
+}
+
+/**
+ * Remove legacy extensionless keys (`name_<hash>`) that are shadowed by an
+ * extensionful sibling (`name_<hash>.<ext>`).
+ *
+ * Builds before extension-borrowing wrote location-header entries under the
+ * bare `getFileName(src)` key. Current builds write the extensionful form. On a
+ * device upgraded across that change both keys coexist, and the stale bare key
+ * is never refreshed again — `getCanonicalFileName` must resolve to the
+ * extensionful sibling, and this prune drops the dead bare key for good.
+ *
+ * Bare keys with no extensionful sibling are left alone: they are the only
+ * record for that entry and the next update cycle rewrites them correctly.
+ *
+ * Mutates `mediaInfoObject` in place and returns the removed keys.
+ */
+export function pruneShadowedMediaInfoKeys(mediaInfoObject: MediaInfoObject): string[] {
+	const removed: string[] = [];
+	const keys = Object.keys(mediaInfoObject);
+	for (const key of keys) {
+		if (path.extname(key)) {
+			continue;
+		}
+		const prefix = key + '.';
+		if (keys.some((other) => other.startsWith(prefix))) {
+			delete mediaInfoObject[key];
+			removed.push(key);
+		}
+	}
+	return removed;
 }
 
 export function createJsonStructureMediaInfo(fileList: MergedDownloadList[]): MediaInfoObject {
@@ -145,7 +234,7 @@ export function updateJsonObject(jsonObject: MediaInfoObject, attr: string, valu
 }
 
 export function mapFileType(filePath: string): ItemType {
-	const fileType = filePath.substring(filePath.lastIndexOf('/'));
+	const fileType = filePath.substring(filePath.lastIndexOf('/') + 1);
 	return get(mapObject, fileType, 'unknown');
 }
 
@@ -167,6 +256,15 @@ export function shouldNotDownload(localFilePath: string, file: MergedDownloadLis
 	);
 }
 
+/**
+ * playCheckUrl gate classifier: skip playback only when the gate HEAD status is explicitly listed
+ * in skipPlaybackOnHttpStatus. Anything else — including unlisted 5xx — plays (fail-open).
+ * An empty list means the gate is inert (the meta is required, no default).
+ */
+export function shouldGateSkipForStatus(status: number, skipPlaybackHttpStatusCodes: number[]): boolean {
+	return skipPlaybackHttpStatusCodes.includes(status);
+}
+
 export function isWidgetUrl(widgetUrl: string): boolean {
 	for (const ext of WidgetExtensions) {
 		if (getFileName(widgetUrl).indexOf(ext) > -1) {
@@ -182,7 +280,7 @@ export function isLocalFileWidget(filePath: string): boolean {
 
 export function createPoPMessagePayload(
 	value: MergedDownloadList,
-	errMessage: string | null,
+	errMessage: string | null = null,
 	event: 'download' | undefined = undefined,
 ): IRecordItemOptions {
 	return {
@@ -200,10 +298,45 @@ export function createPoPMessagePayload(
 	};
 }
 
-export function createCustomEndpointMessagePayload(message: IRecordItemOptions): CustomEndpointReport {
+export interface OfflineReportFileInfo {
+	numberOfReports: number;
+	hasFailureReports?: boolean;
+}
+
+/**
+ * Extracts the numeric index from an offline report file path
+ * (e.g. smil/offlineReports/offlineReports12.csv -> 12), looking only at
+ * the file name so digits elsewhere in the path cannot corrupt the index.
+ */
+export function getOfflineReportFileIndex(filePath: string): number {
+	const fileName = filePath.split('/').pop() ?? '';
+	return parseInt(fileName.split('.csv')[0].replace(/\D/g, ''), 10);
+}
+
+/**
+ * The watcher holds back the currently active file only while it is purely
+ * accumulating reportMode="batch" reports below the limit. Files containing
+ * failure-saved realtime reports must upload on the next pass — the device
+ * being back online is the whole point of saving them.
+ */
+export function shouldSkipActiveReportFile(
+	trackedInfo: OfflineReportFileInfo | undefined,
+	reportCount: number,
+	reportFileLimit: number,
+): boolean {
+	return !!trackedInfo && !trackedInfo.hasFailureReports && reportCount < reportFileLimit;
+}
+
+export function createCustomEndpointMessagePayload(
+	message: IRecordItemOptions,
+	locationUrl?: string,
+	statusCode?: number,
+): CustomEndpointReport {
 	return {
 		...message,
-		recordedAt: new Date().toISOString(),
 		...(message.tags ? { tags: removeLastArrayItem(message.tags) } : {}),
+		status: statusCode ?? 200,
+		time: Math.floor(Date.now() / 1000),
+		url: locationUrl || '',
 	};
 }

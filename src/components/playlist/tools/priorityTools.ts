@@ -1,5 +1,5 @@
 import { PriorityObject } from '../../../models/priorityModels';
-import { PriorityDefault } from '../../../enums/priorityEnums';
+import { PriorityDefault, PriorityRule } from '../../../enums/priorityEnums';
 
 export function createPriorityObject(
 	priorityClass: PriorityObject,
@@ -9,10 +9,9 @@ export function createPriorityObject(
 	return {
 		priorityLevel,
 		maxPriorityLevel,
-		lower: priorityClass.lower ?? PriorityDefault.lower,
-		peer: priorityClass.peer ?? PriorityDefault.peer,
-		// TODO: default stop for higher priority for Dynamic Content
-		higher: 'stop',
+		lower: priorityClass.lower ?? PriorityRule.defer,
+		peer: priorityClass.peer ?? PriorityRule.never,
+		higher: priorityClass.higher ?? PriorityRule.stop,
 		pauseDisplay: priorityClass.pauseDisplay ?? PriorityDefault.pauseDisplay,
 	};
 }

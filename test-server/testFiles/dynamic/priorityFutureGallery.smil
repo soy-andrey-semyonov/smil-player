@@ -1,0 +1,90 @@
+<smil>
+    <head>
+        <meta http-equiv="Refresh" content="444"/>
+        <meta defaultRepeatCount="indefinite"/>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#000000"/>
+            <region regionName="video" left="0" top="0" width="1280" height="720" z-index="1" backgroundColor="#000000"
+                    mediaAlign="topLeft" sync="true"/>
+        </layout>
+    </head>
+
+    <body systemComponent="http://www.w3.org/1999/xhtml" style="background-color:#000000">
+
+        <par>
+            <seq end="__prefetchEnd.endEvent">
+                <seq repeatCount="indefinite">
+                    <img src="http://localhost:3000/assets/loading_min.jpeg" dur="5s" fit="fill"/>
+                </seq>
+            </seq>
+
+            <par begin="__prefetchEnd.endEvent" repeatCount="indefinite">
+                <!-- Repro fixture for the "future-begin priority stalls then flickers" bug.
+                     Mirrors the production GalleryModule playlist (docs/superpowers/bugs/playlist.smil):
+                     - higher priorityClass (no attributes -> lower=defer, peer=never, higher=stop)
+                       whose single campaign seq has a NON-repeating wallclock window that opens
+                       DURING playback (~+50s) and closes minutes later
+                       (placeholder names must NOT appear in comments: fillWallclock uses
+                       first-occurrence String.replace)
+                     - lower priorityClass with higher="pause" pauseDisplay="hide" holding an
+                       always-active gallery seq plus a second, currently-active wallclock seq
+                     Expected per SMIL spec: at window open, higher content takes over and plays
+                     EXCLUSIVELY until window close; lower resumes afterwards. -->
+                <excl>
+                    <par>
+                        <seq repeatCount="indefinite">
+                            <priorityClass>
+                                <seq repeatCount="indefinite">
+                                    <!-- high class uses DIFFERENT media files (landscape1/loader) than the
+                                         low class (video-test-1/2) so the rendered local filename alone
+                                         identifies which priority class is on screen -->
+                                    <seq repeatCount="1" begin="FUTGAL_HIGH_BEGIN" end="FUTGAL_HIGH_END">
+                                        <video src="http://localhost:3000/assets/landscape1.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                        <video src="http://localhost:3000/assets/loader.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                    </seq>
+                                </seq>
+                            </priorityClass>
+                            <priorityClass higher="pause" pauseDisplay="hide">
+                                <seq repeatCount="indefinite">
+                                    <!-- gallery: video, img, video - plays once per cycle -->
+                                    <seq repeatCount="1">
+                                        <video src="http://localhost:3000/assets/video-test-1.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                        <img src="http://localhost:3000/assets/img_1.jpg"
+                                             dur="5s" fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </img>
+                                        <video src="http://localhost:3000/assets/video-test-2.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                    </seq>
+                                    <!-- second campaign with currently-active wallclock window
+                                         (mirrors customer's m4/m5 seq) -->
+                                    <seq repeatCount="1" begin="FUTGAL_LOWWIN_BEGIN" end="FUTGAL_LOWWIN_END">
+                                        <video src="http://localhost:3000/assets-b/video-test-1.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                        <video src="http://localhost:3000/assets-b/video-test-2.mp4"
+                                               fit="hidden" region="video">
+                                            <param name="cacheControl" value="auto"/>
+                                        </video>
+                                    </seq>
+                                </seq>
+                            </priorityClass>
+                        </seq>
+                    </par>
+                </excl>
+            </par>
+        </par>
+    </body>
+</smil>

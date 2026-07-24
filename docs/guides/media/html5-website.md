@@ -21,4 +21,9 @@ use [HTML5 Widget](https://docs.signageos.io/hc/en-us/articles/4414003715090).
 
 ## Important remarks
 
-- Websites are often rendered via iframe, make sure that the website can be loaded this way
+- Websites are rendered in an iframe — make sure the website allows being embedded (no `X-Frame-Options`/CSP
+  restrictions)
+- Whether a `<ref>` is treated as a live website or as a cached [widget](html5-widgets.md) is decided by the URL's
+  file extension: `.wgt`, `.zip`, `.ipk`, `.apk` are widget archives; anything else is a live website. The `type`
+  attribute does not affect this decision
+- Websites keep their original URL including query parameters; they are never downloaded or update-checked

@@ -13,6 +13,7 @@ import {
 	RegionAttributes,
 	RegionsObject,
 	RootLayout,
+	SmilLogger,
 	SMILMetaObject,
 	TransitionAttributes,
 	TransitionsObject,
@@ -142,7 +143,7 @@ export function parseNestedRegions(paramValue: RegionAttributes): RegionAttribut
 						delete innerValue.right;
 						break;
 					default:
-						debug('Unhandled attribute found during nestedRegion parsing: %s', innerRegionKey);
+						debug('[xml] skipping unhandled nested region attribute: %s', innerRegionKey);
 				}
 			}
 		}
@@ -218,7 +219,7 @@ export function removeDataFromPlaylist(playableMedia: SMILPlaylist) {
 	new JefNode(playableMedia.playlist).remove((node: { key: string; value: any }) => {
 		if (node.key === 'ticker') {
 			if (!node.value?.text?.some((text: any) => typeof text === 'string')) {
-				console.warn('Ticker component must have "text" array with one string at least');
+				debug('[xml] invalid ticker: must have "text" array with at least one string');
 				return node;
 			}
 		}
@@ -263,7 +264,7 @@ export function extractDataFromPlaylist(
 				new JefNode(node.parent.value).filter(
 					(introNode: { key: string; value: any; parent: { key: string; value: any } }) => {
 						if (!isNil(introNode.key) && XmlTags.extractedElements.includes(removeDigits(introNode.key))) {
-							debug('Intro element found: %O', introNode.parent.value);
+							debug('[xml] intro element found: %O', introNode.parent.value);
 							downloads.intro.push(introNode.parent.value);
 						}
 					},
@@ -325,6 +326,20 @@ export function parseHeadInfo(metaObjects: XmlHeadObject, regions: RegionsObject
 	}
 }
 
+// Comma-separated HTTP status list from a meta attribute. Tolerates malformed input:
+// xml2js parseBooleans can deliver a boolean instead of a string (String() guard), and
+// non-numeric or empty segments are dropped so NaN/0 never enter the list - a fully
+// malformed value parses as [] which keeps the consumers' empty-list (inert + warn) semantics.
+function parseHttpStatusList(value: string | undefined): number[] {
+	if (!value) {
+		return [];
+	}
+	return String(value)
+		.split(',')
+		.map(Number)
+		.filter((status: number) => !isNaN(status) && status > 0);
+}
+
 function parseMetaInfo(meta: SMILMetaObject[], regions: RegionsObject) {
 	if (!Array.isArray(meta)) {
 		meta = [meta];
@@ -359,9 +374,11 @@ function parseMetaInfo(meta: SMILMetaObject[], regions: RegionsObject) {
 		}
 
 		if (metaRecord.hasOwnProperty(SMILEnums.skipContentOnHttpStatus)) {
-			regions.skipContentOnHttpStatus = metaRecord.skipContentOnHttpStatus
-				? metaRecord.skipContentOnHttpStatus.split(',').map(Number)
-				: [];
+			regions.skipContentOnHttpStatus = parseHttpStatusList(metaRecord.skipContentOnHttpStatus);
+		}
+
+		if (metaRecord.hasOwnProperty(SMILEnums.skipPlaybackOnHttpStatus)) {
+			regions.skipPlaybackOnHttpStatus = parseHttpStatusList(metaRecord.skipPlaybackOnHttpStatus);
 		}
 
 		if (metaRecord.hasOwnProperty(SMILEnums.updateMechanism)) {
@@ -370,9 +387,7 @@ function parseMetaInfo(meta: SMILMetaObject[], regions: RegionsObject) {
 		}
 
 		if (metaRecord.hasOwnProperty(SMILEnums.updateContentOnHttpStatus)) {
-			regions.updateContentOnHttpStatus = metaRecord.updateContentOnHttpStatus
-				? metaRecord.updateContentOnHttpStatus.split(',').map(Number)
-				: [];
+			regions.updateContentOnHttpStatus = parseHttpStatusList(metaRecord.updateContentOnHttpStatus);
 		}
 
 		if (metaRecord.hasOwnProperty(SMILEnums.metaLog)) {
@@ -398,6 +413,14 @@ function parseMetaInfo(meta: SMILMetaObject[], regions: RegionsObject) {
 		if (metaRecord.hasOwnProperty(SMILEnums.defaultTransition)) {
 			regions.defaultTransition = metaRecord.defaultTransition;
 		}
+		if (metaRecord.hasOwnProperty(SMILEnums.checkBeforePlay)) {
+			const cbpVal = metaRecord.checkBeforePlay;
+			regions.checkBeforePlay = cbpVal === true
+				|| (typeof cbpVal === 'string' && cbpVal.toLowerCase() === 'true');
+		}
+		if (metaRecord.hasOwnProperty(SMILEnums.checkAheadCount)) {
+			regions.checkAheadCount = Math.max(0, parseInt(metaRecord.checkAheadCount!) || 0);
+		}
 	}
 
 	if (!smilFileRefreshSet) {
@@ -407,6 +430,23 @@ function parseMetaInfo(meta: SMILMetaObject[], regions: RegionsObject) {
 
 function isAllowedSmilLogging(item: string): item is smilLogging.standard | smilLogging.proofOfPlay {
 	return item === smilLogging.standard || item === smilLogging.proofOfPlay;
+}
+
+/**
+ * sos.config.reportUrl overrides where proof of play reports are sent, but it must not
+ * silence the logging types requested by the smil meta (e.g. type="manual,standard").
+ * proofOfPlay is always included because a configured reportUrl implies PoP reporting.
+ */
+export function mergeLoggerWithConfigReportUrl(logger: SmilLogger, configReportUrl: string): SmilLogger {
+	const type: SmilLogger['type'] = logger.type?.includes(smilLogging.proofOfPlay)
+		? logger.type
+		: [...(logger.type ?? []), smilLogging.proofOfPlay];
+	return {
+		...logger,
+		enabled: true,
+		type,
+		endpoint: configReportUrl,
+	};
 }
 
 function parseSensorsInfo(sensors: SMILSensors): ParsedSensor[] {
@@ -474,7 +514,11 @@ export function extractRegionInfo(xmlObject: RegionsObject): RegionsObject {
 			fallbackToPreviousPlaylist: false,
 		},
 		onlySmilFileUpdate: false,
+		checkBeforePlay: false,
+		checkAheadCount: 0,
 		skipContentOnHttpStatus: [],
+		// empty = playCheckUrl gate inert (the meta is required, no default codes)
+		skipPlaybackOnHttpStatus: [],
 		updateContentOnHttpStatus: [],
 		updateMechanism: SMILEnums.lastModified,
 		logger: {

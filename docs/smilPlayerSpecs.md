@@ -6,14 +6,16 @@
 
 ### SMIL Media Objects
 [A-smil reference](https://www.a-smil.org/index.php/SMIL_Media_Objects)
-* All media objects are supported except audio and text. Functionality fo audio is coded and its working, but its commented
-out due to interaction with audio of videos.
+* All media objects are supported except audio. Functionality for audio is coded, but it's commented
+out due to interaction with audio of videos (audio files are still downloaded — avoid them in playlists).
+* Scrolling text is supported via the `ticker` element (see the [Ticker guide](guides/media/ticker.md)).
 * Src can be specified with relative path or absolute path. If relative path is specified smil player will combine it with 
 actual path to smil file to get absolute one. More in signageOS docs.
 * Duration is specified in seconds, either with `s` string or without. Or `indefinite` string.
 
 #### Our changes/limitations
-* z-index can be specified directly on element
+* z-index can be specified directly on element (images, widgets, tickers — not videos, which render on the native
+video plane)
 
 #### Example
 ```
@@ -24,7 +26,10 @@ actual path to smil file to get absolute one. More in signageOS docs.
 
 ### SMIL Playlists
 [A-smil reference](https://www.a-smil.org/index.php/SMIL_Playlists)
-* All tags are supported and behave by standard specification.
+* `seq`, `par`, `excl` and `priorityClass` are supported. Deviations from the standard: `excl` relies on its
+`priorityClass` children for exclusivity (its own `begin`/`repeatCount` are ignored — wrap it in a `par`), the
+priorityClass defaults differ (see the [Priority guide](guides/layout-playlist/priority-playlist.md)), and `audio` is
+not played.
 
 ### SMIL Scheduling
 [A-smil reference](https://www.a-smil.org/index.php/SMIL_Scheduling)
@@ -48,7 +53,7 @@ objectFit = 'object-fit'
 #### Our changes/limitations
 * we use region definition to specify if content in that region should be synchronized or not = `sync="true"`
 * for triggers we use nested regions. See example below or our docs. But basically region has several nested regions, with
-dimensions derived from parent region and trigger si dynamically assigned to one of free nested regions. If none is free, trigger will be assigned to first one.
+dimensions derived from parent region and the trigger is dynamically assigned to one of the free nested regions. If none is free, trigger will be assigned to the first one.
 
 #### Example
 ```
@@ -61,7 +66,8 @@ dimensions derived from parent region and trigger si dynamically assigned to one
 
 ### Interactivity
 [A-smil reference](https://www.a-smil.org/index.php/Interactivity)
-* For interactivity, we use functionality called triggers. Currently, we have keyboard, mouse, nexmosphere sensors and sync failover triggers.
+* For interactivity, we use functionality called triggers. Currently, we have keyboard, mouse/touch, widget-emitted,
+nexmosphere RFID sensor, and sync failover triggers, plus network-driven dynamic playlists (`emitDynamic`).
 * We handle triggers completely different that in a-smil standard. See our docs for details.
 
 ### Video input
@@ -78,7 +84,9 @@ dimensions derived from parent region and trigger si dynamically assigned to one
 
   * ### Sync Playback
 [A-smil reference](https://www.a-smil.org/index.php/Sync_Playback)
-* Handled differently, we use applet-synchronizer (our sync server) to sync content.
+* Handled differently, via an ACK-based coordination protocol. With `syncServerUrl` configured the devices coordinate
+through a sync server (applet-synchronizer); without it they use local-network peer-to-peer. `syncGroupName` is
+required.
 * Its quite complicated setup see our docs for details.
 * Which media should be synced among devices is specified in region definition (see layout section). All content within this region will
 synchronized.
@@ -96,10 +104,31 @@ synchronized.
 `onlySmilUpdate="true"`.
 * Its possible to specify conditional expression. Smil player will check for updates only if expression evaluates to true.
 `expr="adapi-weekday()&lt;=4"`
+* Its possible to check each media file for updates right before playback instead of polling on a timer.
+`checkBeforePlay="true"`. See the [Check Before Play guide](guides/configuration-caching/check-before-play.md) for details.
+* Split refresh intervals: `contentRefresh` sets a separate refresh interval (in seconds) for media content, and
+`smilFileRefresh` sets a separate interval for the SMIL file itself. When set, these take precedence over the
+`content` value. See the [Updating SMIL Playlist guide](guides/configuration-caching/updating-smil-playlist.md).
+* `fallbackToPreviousPlaylist="true"` — the player continues playing the previous valid playlist if a newly downloaded
+SMIL file is invalid or empty.
+* Per-element update attributes (`updateCheckUrl`, `updateCheckInterval`, `allowLocalFallback`) and global status-code
+handling (`skipContentOnHttpStatus`, `updateContentOnHttpStatus`) allow fine-grained control over media updates.
+See the [Media Update Configuration guide](guides/configuration-caching/media-update-configuration.md).
+* Per-element playability gate: `playCheckUrl` HEADs a dedicated URL right before each play and skips that pass when
+the status is listed in `<meta skipPlaybackOnHttpStatus>` (required; independent of `skipContentOnHttpStatus`).
+Pure play/skip control — no effect on downloads or update checks; fails open on network errors.
+See the [Media Update Configuration guide](guides/configuration-caching/media-update-configuration.md#playcheckurl-playability-gate).
+* `checkAheadCount` pre-checks the content slot N positions ahead while the current element plays, so updated media is
+downloaded before it is due. See the [Check Before Play guide](guides/configuration-caching/check-before-play.md).
+* `timeOut` sets the timeout in milliseconds for HEAD update-check requests (default `2000`).
+* Other supported `<meta>` attributes: `defaultRepeatCount` (`1`/`indefinite`, applied where no `repeatCount` is
+specified), `defaultTransition` (transition ID applied to images/widgets without their own `transIn`), and
+`reportFileLimit` (batch-report file size, see [Custom Endpoint Reporting](guides/reporting/custom-endpoint.md)).
 
 #### Example
 ```
 <meta http-equiv="Refresh" content="10" onlySmilUpdate="true" expr="adapi-weekday()&lt;=4"/>
+<meta http-equiv="Refresh" content="60" contentRefresh="120" smilFileRefresh="30" fallbackToPreviousPlaylist="true"/>
 ```
 
 ### Prefetch
@@ -109,10 +138,15 @@ synchronized.
 ### Reporting
 [A-smil reference](https://www.a-smil.org/index.php/Reporting)
 * We use our FrontApplet `command.dispatch` for reporting. It has to be allowed in smil file.
+* A custom reporting endpoint can be configured via the `reportUrl` applet config option or the `endpoint` attribute
+on the `<meta>` tag. When a custom endpoint is set, PoP reports are sent as POST requests. See the
+[Custom Endpoint Reporting guide](guides/reporting/custom-endpoint.md).
+* Download reports include HTTP status codes. See the [Event Reporting guide](guides/reporting/event-reporting.md).
 
 #### Example
 ```
 <meta log="true" />
+<meta log="true" type="manual" endpoint="https://custom.endpoint.com/reports"/>
 ```
 
 ### Wallclock
@@ -127,8 +161,11 @@ synchronized.
   * We are using transition by standard specification
 
 #### Our changes/limitations
-* only supported transition is `crossfade`.
+* supported transitions are `crossfade` (images and widgets) and `billboard` (images only) — see the
+[Crossfade](guides/transitions/crossfade-transition.md) and [Billboard](guides/transitions/billboard-transition.md)
+guides.
 * transition name is specified by `transitionName` or `xml:id` attribute.
+* a playlist-wide default can be set with the `defaultTransition` meta attribute.
 
 ### Conditional play
 [A-smil reference](https://www.a-smil.org/index.php/Conditional_play)

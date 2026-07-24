@@ -13,9 +13,11 @@ import {
 	RandomPlaylist,
 } from '../../../models/playlistModels';
 import { getFileName } from '../../files/tools';
+import { FileStructure } from '../../../enums/fileEnums';
 import { DeviceModels } from '../../../enums/deviceEnums';
 import Debug from 'debug';
 import { RegionAttributes, RegionsObject } from '../../../models/xmlJsonModels';
+import { TimedDebugger } from '../playlistProcessor/TimedDebugger';
 import { XmlTags } from '../../../enums/xmlEnums';
 import { parentGenerationRemove, randomPlaylistPlayableTagsRegex, SMILEnums } from '../../../enums/generalEnums';
 import { parseNestedRegions } from '../../xmlParser/tools';
@@ -34,6 +36,18 @@ export function generateElementId(filepath: string, regionName: string, key: str
 
 export function getStringToIntDefault(value: string): number {
 	return parseInt(value) || 0;
+}
+
+/**
+ * True when a video has no usable duration information (no measured
+ * fullVideoDuration and no dur attribute). Such a video's end is detected
+ * solely by onceEnded — which never settles when the underlying video player
+ * silently failed to allocate — so the playback race must arm an absolute
+ * time backstop for it.
+ */
+export function needsUnknownDurationBackstop(video: SMILVideo): boolean {
+	const hasKnownDuration = 'fullVideoDuration' in video && video.fullVideoDuration !== SMILEnums.defaultVideoDuration;
+	return !hasKnownDuration && !('dur' in video);
 }
 
 export function removeWhitespace(str: string) {
@@ -146,7 +160,7 @@ export function getRegionInfo(regionObject: RegionsObject, regionName: string): 
 	if (regionInfo.hasOwnProperty(SMILEnums.region)) {
 		regionInfo = parseNestedRegions(regionInfo);
 	}
-	debug('Getting region info: %O for region name: %s', regionInfo, regionName);
+	debug('[general] getting region info: region=%s', regionName);
 	regionInfo = {
 		...regionInfo,
 		...(!isNil(regionInfo.top) && { top: parseInt(String(regionInfo.top)) }),
@@ -196,15 +210,13 @@ export function computeSyncIndex(
 // seq-6a985ce1ebe94055895763ce85e1dcaf93cd9620
 export function generateParentId(tagName: string, value: PlaylistElement): string {
 	try {
-		debug('Generating parent id for: %s', tagName, value);
 		let clone = cloneDeep(value);
 		clone = orderJsonObject(clone);
 		removeNestedProperties(clone, parentGenerationRemove);
 		const parent = `${tagName}-${hashSortCoerce.hash(inspect(clone))}`;
-		debug('Generated parent id: %s', parent);
 		return parent;
 	} catch (err) {
-		debug('Error during parent generation: %O', err);
+		debug('[general] error during parent generation: %O', err);
 		return `${tagName}-undefined`;
 	}
 }
@@ -250,7 +262,7 @@ export function getDefaultVideoParams(): VideoParams {
 }
 
 export function getIndexOfPlayingMedia(currentlyPlaying: CurrentlyPlayingRegion[]): number {
-	debug('getting index of currently playing priority: %O ', currentlyPlaying);
+	debug('[general] getting index of playing priority: %O', currentlyPlaying);
 	// no element was played before ( trigger/dynamic playlist case )
 	if (isNil(currentlyPlaying)) {
 		return 0;
@@ -271,13 +283,52 @@ export function removeDigits(expr: string): string {
 	return expr.replace(/[0-9]/g, '');
 }
 
+// setTimeout clamps any delay above the signed 32-bit max (2_147_483_647 ms ≈ 24.8 days)
+// down to 1ms, firing the timer almost immediately. Scheduling further ahead than that —
+// e.g. a wallclock `begin` a month or two out — must therefore be split into ≤32-bit
+// chunks, otherwise the awaited element activates NOW instead of staying dormant until its
+// window (the "far-future priorityClass plays immediately and blocks the playlist" bug).
+const MAX_SETTIMEOUT_DELAY = 2_147_483_647;
+
 export async function sleep(ms: number): Promise<void> {
+	// Burn down delays beyond the 32-bit cap in full-size chunks so the total wait is
+	// honoured. No-op for normal short sleeps (the loop is skipped when ms ≤ the cap).
+	let remaining = ms;
+	while (remaining > MAX_SETTIMEOUT_DELAY) {
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, MAX_SETTIMEOUT_DELAY);
+		});
+		remaining -= MAX_SETTIMEOUT_DELAY;
+	}
+
 	let timeoutId;
 	await new Promise((resolve) => {
-		timeoutId = setTimeout(resolve, ms);
+		timeoutId = setTimeout(resolve, remaining);
 	});
 
 	clearTimeout(timeoutId);
+}
+
+export async function promiseWithTimeout<T>(
+	promise: Promise<T>,
+	timeoutMs: number,
+	errorMessage: string = 'Client-side timeout exceeded',
+): Promise<T> {
+	let timeoutId: ReturnType<typeof setTimeout>;
+	const timeoutPromise = new Promise<never>((_, reject) => {
+		timeoutId = setTimeout(
+			() => {
+				reject(new Error(`${errorMessage}: ${timeoutMs}ms`));
+			},
+			timeoutMs,
+		);
+	});
+
+	try {
+		return await Promise.race([promise, timeoutPromise]);
+	} finally {
+		clearTimeout(timeoutId!);
+	}
 }
 
 export function orderJsonObject(jsonObject: { [key in string]: unknown }): { [key in string]: unknown } {
@@ -304,16 +355,23 @@ export function shuffleObject(playlist: { [key in string]: unknown }): { [key in
 export function pickRandomOne(playlist: { [key in string]: unknown }) {
 	const localPlaylist = cloneDeep(playlist);
 	const playableParts = Object.keys(localPlaylist).filter((v) => randomPlaylistPlayableTagsRegex.test(v));
-	let picked = playableParts[Math.floor(Math.random() * playableParts.length)];
-	// case playmode is set seq/par containing other seq/par tags and not directly img, video etc...
+	const picked = playableParts[Math.floor(Math.random() * playableParts.length)];
+	// Array case: xml2js collapses duplicate structure-tag siblings (<seq>, <par>)
+	// under one key. Pick one array item and drop the rest; retain the picked key
+	// holding a single-element array so downstream code that assumes the tag is
+	// present stays happy. (The previous implementation used omit with path
+	// `seq[i]` + filter-truthy, which inverted the semantics: it dropped ONE
+	// random item and kept the rest, producing N-1 instead of 1.)
 	if (Array.isArray(localPlaylist[picked])) {
-		const pickedWithIndex = `${picked}[${Math.floor(
-			Math.random() * (localPlaylist[picked] as Array<{ [key in string]: unknown }>).length,
-		)}]`;
-		const finalObject: { [key in string]: unknown } = omit(localPlaylist, pickedWithIndex);
-		finalObject[picked] = (finalObject[picked] as Array<{ [key in string]: unknown }>).filter((elem) => elem);
-		return finalObject;
+		const arr = localPlaylist[picked] as Array<{ [key in string]: unknown }>;
+		const pickedIdx = Math.floor(Math.random() * arr.length);
+		const omitKeys = difference(playableParts, [picked]);
+		const result = omit(localPlaylist, omitKeys) as { [key: string]: unknown };
+		result[picked] = [arr[pickedIdx]];
+		return result;
 	}
+	// Flat case: multiple distinct playable keys (e.g. video0 + img1). Keep the
+	// picked key, drop the others.
 	const diff = difference(playableParts, [picked]);
 	return omit(localPlaylist, diff);
 }
@@ -329,10 +387,92 @@ export function getNextElementToPlay(
 		};
 	}
 	const localPlaylist = cloneDeep(playlist);
-	const playableParts = Object.keys(localPlaylist).filter((v) => randomPlaylistPlayableTagsRegex.test(v));
-	const picked = playableParts[randomPlaylistInfo[parent].previousIndex++ % playableParts.length];
-	const diff = difference(playableParts, [picked]);
-	return omit(localPlaylist, diff);
+	const playableKeys = Object.keys(localPlaylist).filter((v) => randomPlaylistPlayableTagsRegex.test(v));
+
+	// xml2js collapses duplicate structure-tag siblings (<seq>, <par>, ...) under
+	// a single key with an array value. Flatten array items into individual slots
+	// so playMode="one" cycles per child, not per key.
+	const slots: { key: string; itemIndex: number | null }[] = [];
+	for (const key of playableKeys) {
+		const val = localPlaylist[key];
+		if (Array.isArray(val)) {
+			for (let i = 0; i < val.length; i++) {
+				slots.push({ key, itemIndex: i });
+			}
+		} else {
+			slots.push({ key, itemIndex: null });
+		}
+	}
+
+	if (slots.length === 0) {
+		return localPlaylist;
+	}
+
+	const pickedSlot = slots[randomPlaylistInfo[parent].previousIndex++ % slots.length];
+
+	const dropKeys = playableKeys.filter((k) => k !== pickedSlot.key);
+	const result = omit(localPlaylist, dropKeys) as { [key: string]: unknown };
+
+	if (pickedSlot.itemIndex !== null) {
+		const arr = result[pickedSlot.key] as unknown[];
+		result[pickedSlot.key] = [arr[pickedSlot.itemIndex]];
+	}
+	return result;
+}
+
+/**
+ * Walks a playlist subtree and returns the first leaf media descendant's
+ * region + syncIndex. A leaf is any playable node carrying `regionInfo.regionName`
+ * and a numeric `syncIndex` (set by playlistDataPrepare). Structure wrappers
+ * (<seq>, <par>, <excl>, <priorityClass>) carry neither and are walked through.
+ *
+ * Used by the traverser to derive a deterministic sync key for playMode="one"
+ * parents whose children are structure wrappers rather than direct media —
+ * a one-level-deep lookup would miss the leaf and cause the cmd-playMode
+ * broadcast branch to be silently skipped.
+ */
+export function findFirstMediaDescendant(
+	node: { [key: string]: unknown } | undefined,
+): { regionName: string; syncIndex: number } | undefined {
+	if (!node || typeof node !== 'object') { return undefined; }
+	for (const key of Object.keys(node)) {
+		if (!randomPlaylistPlayableTagsRegex.test(key)) { continue; }
+		const val = node[key];
+		const candidates = Array.isArray(val) ? val : [val];
+		for (const c of candidates) {
+			if (!c || typeof c !== 'object') { continue; }
+			const regionName = (c as { regionInfo?: { regionName?: unknown } }).regionInfo?.regionName;
+			const syncIndex = (c as { syncIndex?: unknown }).syncIndex;
+			if (typeof regionName === 'string' && typeof syncIndex === 'number') {
+				return { regionName, syncIndex };
+			}
+			const nested = findFirstMediaDescendant(c as { [key: string]: unknown });
+			if (nested) { return nested; }
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Given two per-region syncIndex snapshots taken before and after processing
+ * a playMode="one" parent's descendants, returns the per-region range of
+ * syncIndices assigned inside the subtree. Used by playlistDataPrepare to
+ * populate `synchronization.playModeSyncRanges` uniformly whether the media
+ * is a direct child of the playMode parent or nested one level deeper.
+ */
+export function computePlayModeSyncRanges(
+	before: { [regionName: string]: number },
+	after: { [regionName: string]: number },
+): { [regionName: string]: { start: number; end: number } } {
+	const ranges: { [regionName: string]: { start: number; end: number } } = {};
+	for (const region of Object.keys(after)) {
+		const b = before[region] ?? 0;
+		const a = after[region];
+		if (a > b) {
+			ranges[region] = { start: b + 1, end: a };
+		}
+	}
+	return ranges;
 }
 
 export function processRandomPlayMode(
@@ -348,7 +488,73 @@ export function processRandomPlayMode(
 		case 'one':
 			return getNextElementToPlay(playlist, randomPlaylistInfo, parent);
 		default:
-			debug('No valid playMode specified, returning original object, playMode: %s', playlist.playmode);
+			debug('[general] no valid playMode, returning original: playMode=%s', playlist.playmode);
 			return playlist;
+	}
+}
+
+/**
+ * Extracts a string value from config, returning undefined if not a string
+ */
+export function getConfigString(
+	config: Record<string, number | string | boolean> | undefined,
+	key: string,
+): string | undefined {
+	if (!config) {
+		return undefined;
+	}
+	const value = config[key];
+	return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Extracts a boolean value from config, handling string 'true'/'false'
+ */
+export function getConfigBoolean(
+	config: Record<string, number | string | boolean> | undefined,
+	key: string,
+	defaultValue: boolean = false,
+): boolean {
+	if (!config) {
+		return defaultValue;
+	}
+	const value = config[key];
+	if (typeof value === 'boolean') {
+		return value;
+	}
+	if (typeof value === 'string') {
+		return value.toLowerCase() === 'true';
+	}
+	return defaultValue;
+}
+
+/**
+ * Get ISO timestamp for debug logs
+ */
+function getTimestamp(): string {
+	return new Date().toISOString();
+}
+
+/**
+ * Helper to log debug messages, using TimedDebugger if available
+ */
+export function logDebug(timedDebug: TimedDebugger | undefined, message: string, ...args: any[]): void {
+	if (timedDebug) {
+		timedDebug.log(message, ...args);
+	} else {
+		debug('[%s] ' + message, getTimestamp(), ...args);
+	}
+}
+
+/**
+ * Maps a SMIL media element type to its on-disk FileStructure folder.
+ */
+export function getFileStructureForMediaType(mediaType: string): string | undefined {
+	switch (mediaType) {
+		case 'video': return FileStructure.videos;
+		case 'img': return FileStructure.images;
+		case 'ref': return FileStructure.widgets;
+		case 'audio': return FileStructure.audios;
+		default: return undefined;
 	}
 }

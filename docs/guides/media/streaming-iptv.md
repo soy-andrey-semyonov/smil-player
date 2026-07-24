@@ -6,9 +6,16 @@ With signageOS SMIL Player you can play video streams with various formats if th
 
 For signageOS SMIL Player to correctly recognize streams, it is necessary to include `isStream="true"` in video tag.
 
+> **Warning:** the mere *presence* of the `isStream` attribute marks the element as a stream — `isStream="false"` is
+> also treated as a stream. Remove the attribute entirely for regular video files.
+
 It is possible to specify the duration of the stream in the same way as any other media in SMIL by specifying `dur` attribute.
 
-If no `dur` attribute is specified, the stream will play indefinitely.
+If no `dur` attribute is specified, the stream will play indefinitely (until the stream disconnects or errors, at
+which point the playlist moves on).
+
+The streaming protocol is derived automatically from the URL scheme — there is no attribute to set it. Streams are
+played live from the network; they are never downloaded, cached, or update-checked.
 
 **Supported formats:**
 
@@ -17,6 +24,7 @@ If no `dur` attribute is specified, the stream will play indefinitely.
 - RTSP
 - HLS
 - HTTP
+- RTMP
 
 ```xml
 <video src="udp://{ip}/{endpoint}" isStream="true" />

@@ -20,8 +20,11 @@ export type RegionsObject = {
 	defaultRepeatCount?: '1' | 'indefinite';
 	defaultTransition?: string;
 	skipContentOnHttpStatus: number[];
+	skipPlaybackOnHttpStatus: number[];
 	updateContentOnHttpStatus: number[];
 	updateMechanism: 'location' | 'last-modified';
+	checkBeforePlay: boolean;
+	checkAheadCount: number;
 	[key: string]: any;
 };
 
@@ -86,9 +89,12 @@ export type SMILMetaObject = {
 	defaultRepeatCount?: '1' | 'indefinite';
 	defaultTransition?: string;
 	skipContentOnHttpStatus?: string;
+	skipPlaybackOnHttpStatus?: string;
 	updateContentOnHttpStatus?: string;
 	fallbackToPreviousPlaylist?: boolean;
 	updateMechanism?: string;
+	checkBeforePlay?: boolean | string;
+	checkAheadCount?: string;
 };
 
 export type RegionAttributes = {

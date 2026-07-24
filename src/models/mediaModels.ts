@@ -14,6 +14,8 @@ export type UpdateChecks = {
 	updateCheckUrl?: string;
 	updateCheckInterval?: number;
 	allowLocalFallback?: boolean;
+	// playability gate URL — read only by playCheckGate, never used for downloads/update detection
+	playCheckUrl?: string;
 };
 
 export type SMILVideo = {
@@ -37,6 +39,7 @@ export type SMILVideo = {
 	dynamicValue?: string;
 	syncGroupName?: string;
 	wasUpdated?: boolean;
+	useInReportUrlStale?: boolean;
 } & PoPAttributes &
 	UpdateChecks;
 
@@ -57,6 +60,7 @@ export type SMILAudio = {
 	dynamicValue?: string;
 	syncGroupName?: string;
 	wasUpdated?: boolean;
+	useInReportUrlStale?: boolean;
 	'z-index': string;
 } & PoPAttributes &
 	UpdateChecks;
@@ -80,6 +84,7 @@ export type SMILImage = {
 	dynamicValue?: string;
 	syncGroupName?: string;
 	wasUpdated?: boolean;
+	useInReportUrlStale?: boolean;
 	'z-index': string;
 } & PoPAttributes &
 	UpdateChecks;
@@ -103,6 +108,7 @@ export type SMILWidget = {
 	dynamicValue?: string;
 	syncGroupName?: string;
 	wasUpdated?: boolean;
+	useInReportUrlStale?: boolean;
 	'z-index': string;
 } & PoPAttributes &
 	UpdateChecks;
@@ -135,6 +141,7 @@ export type SMILTicker = {
 	syncGroupName?: string;
 	'z-index': string;
 	wasUpdated?: boolean;
+	useInReportUrlStale?: boolean;
 	timeoutReference?: ReturnType<typeof setTimeout>;
 } & PoPAttributes &
 	UpdateChecks;
@@ -156,6 +163,7 @@ export type SosHtmlElement = {
 	transitionInfo?: TransitionAttributes;
 	localFilePath: string;
 	useInReportUrl?: string;
+	useInReportUrlStale?: boolean;
 } & PoPAttributes &
 	UpdateChecks;
 

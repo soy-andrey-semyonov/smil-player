@@ -1,0 +1,48 @@
+<smil>
+    <head>
+        <layout>
+            <root-layout width="1920" height="1080" backgroundColor="#000000"/>
+            <region regionName="video" left="0" top="0" width="1920" height="1080" z-index="1"
+                    backgroundColor="#000000"/>
+        </layout>
+    </head>
+    <body>
+        <par>
+            <par repeatCount="indefinite">
+                <excl>
+                    <priorityClass higher="stop" lower="defer" peer="stop">
+                        <par>
+                            <seq repeatCount="indefinite">
+                                <!-- expr is on the MEDIA element (always false: weekday is 0-6).
+                                     Container-level expr (on the par) is handled by the traverser;
+                                     media-level expr is only checked inside playElement AFTER
+                                     priorityBehaviour has set player.playing = true. -->
+                                <img src="https://demo.signageos.io/smil/zones/files/img_1.jpg" id="phantom1"
+                                     dur="3s" fit="hidden" region="video" expr="adapi-weekday()&gt;=9">
+                                    <param name="cacheControl" value="auto"/>
+                                </img>
+                            </seq>
+                        </par>
+                    </priorityClass>
+                    <priorityClass higher="stop" lower="defer" peer="stop">
+                        <par>
+                            <!-- Two alternating images so each produces a real visibility
+                                 transition the duration monitor can measure (a single looping
+                                 image never hides between iterations → n=0, unmeasurable). -->
+                            <seq repeatCount="indefinite">
+                                <img src="https://demo.signageos.io/smil/zones/files/img_2.jpg" id="fallback1"
+                                     dur="3s" fit="hidden" region="video">
+                                    <param name="cacheControl" value="auto"/>
+                                </img>
+                                <img src="https://demo.signageos.io/smil/zones/files/img_3.jpg" id="fallback2"
+                                     dur="3s" fit="hidden" region="video">
+                                    <param name="cacheControl" value="auto"/>
+                                </img>
+                            </seq>
+                        </par>
+                    </priorityClass>
+                </excl>
+            </par>
+        </par>
+    </body>
+</smil>

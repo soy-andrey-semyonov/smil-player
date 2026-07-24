@@ -14,7 +14,7 @@ export function parseSmilSchedule(
 	startTime: string,
 	endTime: string = SMILScheduleEnum.endDateAndTimeFuture,
 ): SmilScheduleObject {
-	debug('Received startTime: %s and endTime: %s strings', startTime, endTime);
+	debug('[wallclock] parsing schedule: start=%s, end=%s', startTime, endTime);
 
 	// remove extra characters, wallclock, ( and )
 	let dateStringStart = startTime.replace(/wallclock|\(|\)/g, '');
@@ -87,8 +87,7 @@ export function parseSmilSchedule(
 				datePart = computeScheduledDate(moment(nowDay), nowTime, timeEnd, dateStart, dayInfoStart);
 				timeToEnd = moment(`${datePart}T${timeEnd}`).valueOf();
 
-				debug('schedule for tomorrow');
-				debug('Wait before start: %s and play until: %s', timeToStart, timeToEnd);
+				debug('[wallclock] P1D repeat, start ahead: waitBeforeStart=%d, playUntil=%d', timeToStart, timeToEnd);
 				return {
 					timeToStart,
 					timeToEnd,
@@ -103,16 +102,14 @@ export function parseSmilSchedule(
 			) {
 				timeToStart = 0;
 				timeToEnd = SMILScheduleEnum.neverPlay;
-				debug('wallclock completely in the past, will not be played');
-				debug('Wait before start: %s and play until: %s', timeToStart, timeToEnd);
+				debug('[wallclock] schedule expired (non-repeating): waitBeforeStart=%d, playUntil=%d', timeToStart, timeToEnd);
 				return {
 					timeToStart,
 					timeToEnd,
 				};
 			}
 
-			debug('play immediately');
-			debug('Wait before start: %s and play until: %s', timeToStart, timeToEnd);
+			debug('[wallclock] playing immediately: waitBeforeStart=%d, playUntil=%d', timeToStart, timeToEnd);
 			return {
 				timeToStart,
 				timeToEnd,
@@ -134,16 +131,14 @@ export function parseSmilSchedule(
 		if ((dateEnd < nowDay || timeEnd < nowTime) && splitStringEnd[2] !== 'P1D') {
 			timeToStart = 0;
 			timeToEnd = SMILScheduleEnum.neverPlay;
-			debug('wallclock completely in the past, will not be played');
-			debug('Wait before start: %s and play until: %s', timeToStart, timeToEnd);
+			debug('[wallclock] non-P1D schedule fully past: waitBeforeStart=%d, playUntil=%d', timeToStart, timeToEnd);
 			return {
 				timeToStart,
 				timeToEnd,
 			};
 		}
 
-		debug('schedule for tomorrow');
-		debug('Wait before start: %s and play until: %s', timeToStart, timeToEnd);
+		debug('[wallclock] scheduling tomorrow: both times past today, waitBeforeStart=%d, playUntil=%d', timeToStart, timeToEnd);
 		return {
 			timeToStart,
 			timeToEnd,
@@ -162,8 +157,7 @@ export function parseSmilSchedule(
 		timeToEnd = moment(`${datePart}T${timeEnd}`).valueOf();
 	}
 
-	debug('all in future');
-	debug('Wait before start: %s and play until: %s', timeToStart, timeToEnd);
+	debug('[wallclock] both times in future: waitBeforeStart=%s, playUntil=%s', timeToStart, timeToEnd);
 	return {
 		timeToStart,
 		timeToEnd,
@@ -179,8 +173,20 @@ export function computeScheduledDate(
 ) {
 	// day of the week when will playing stop
 	const terminalDay = startDate.isoWeekday();
-	const scheduledDay = parseInt(dayInfo[2]);
-	if (dayInfo.startsWith('+')) {
+	// dayInfo is shaped like "+w3" or "-w3" — index 2 is the weekday digit.
+	// If the SMIL author truncated the string (e.g. "+w"), dayInfo[2] is
+	// undefined and parseInt yields NaN. Feeding NaN into
+	// moment().isoWeekday(NaN) produces an "Invalid date" string that
+	// silently propagates into timeToStart / timeToEnd downstream and
+	// breaks playback timers. The guards below fall through to the
+	// no-weekday path instead.
+	const scheduledDay = Number.parseInt(dayInfo[2] ?? '', 10);
+	const hasValidWeekdayHint = !Number.isNaN(scheduledDay);
+	if ((dayInfo.startsWith('+') || dayInfo.startsWith('-')) && !hasValidWeekdayHint) {
+		debug('[wallclock] malformed dayInfo digit, ignoring weekday hint: dayInfo=%s', dayInfo);
+	}
+
+	if (dayInfo.startsWith('+') && hasValidWeekdayHint) {
 		if (terminalDay < scheduledDay || (terminalDay === scheduledDay && nowTime <= scheduledTime)) {
 			return startDate.isoWeekday(scheduledDay).format('YYYY-MM-DD');
 		} else {
@@ -188,7 +194,7 @@ export function computeScheduledDate(
 		}
 	}
 
-	if (dayInfo.startsWith('-')) {
+	if (dayInfo.startsWith('-') && hasValidWeekdayHint) {
 		if (terminalDay < scheduledDay || (terminalDay === scheduledDay && nowTime <= scheduledTime)) {
 			const returnDate = moment().isoWeekday(scheduledDay).format('YYYY-MM-DD');
 			// return default date in the past if scheduledDate from SMIL is already in the past

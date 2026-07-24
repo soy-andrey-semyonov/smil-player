@@ -44,6 +44,12 @@ await smilPlayer.start();
 
 ### More advanced usage with extra configuration is being developed. Here is a sneak peek
 
+> **Note: this constructor-options API (including the nested `sync: { … }` object) does not exist yet** — it is a
+> preview of a planned interface. In the current player, all configuration is provided flat via the applet
+> configuration (`sos.config`): `smilUrl`, `backupImageUrl`, `serialPortDevice`, `videoBackground`, `reportUrl`,
+> `syncServerUrl`, `syncGroupName`, `syncGroupIds`, `syncDeviceId`, `debugEnabled`. See
+> [SMIL Player Configuration](docs/guides/tutorials/smil-player-configuration.md).
+
 Smil player accepts various options which allows you to customize player behaviour.
 This is an example how you can inject your custom functionality and modify smil player.
 
@@ -128,7 +134,7 @@ const smilPlayer = new SmilPlayer({
 await smilPlayer.start();
 ```
 
-## Table of options
+## Table of options (planned API — see note above)
 
 | Option                | Description                                                                                                                                         | 
 |-----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|

@@ -30,12 +30,26 @@ implementation for all devices also with timing setup.
 - **id** = unique identifier for the trigger, used to reference the trigger in the playlist
 - **condition** = logical operator to combine multiple conditions
 - **origin** = marks trigger as a sync trigger to use sync group functionality
-- **data** = ID of the device which has issues playing content
+- **data** = identifier(s) of the missing device(s). For multiple devices, concatenate their ids **sorted
+  alphabetically, with no separator** — the player builds the lookup key as `sort + join`, so
+  `data="Display2Display3"` fires but `data="Display3Display2"` never matches.
 
 #### Explanation
 
 If Display3 has issues playing content, triggerDisplay3 takes over and plays.
-If both Display2 and Display3 have issues playing content, take over and play triggerDisplay2Display3.
+If both Display2 and Display3 have issues playing content, take over and play triggerDisplay2Display3. To cover every
+failure combination in a 3-device group, define a trigger for each subset of the *other* devices (e.g. on Display1:
+`Display2`, `Display3`, `Display2Display3`).
+
+#### Required applet configuration
+
+Failover triggers only work when the device knows the full group membership and its own identity:
+
+- `syncGroupIds` — comma-separated list of **all** device ids in the group (e.g. `Display1,Display2,Display3`)
+- `syncDeviceId` — this device's id; must be one of `syncGroupIds`
+
+The player continuously compares the connected peers against `syncGroupIds`; when a device disappears, the matching
+sync trigger fires on the remaining devices, and when it reconnects, the trigger content stops automatically.
 
 ### Define region for triggered content
 
@@ -54,15 +68,10 @@ the [Triggers article](https://docs.signageos.io/hc/en-us/articles/4405241368978
 </layout>
 ```
 
-### Define content triggered by the keyboard trigger
+### Define content triggered by the failover trigger
 
-- The behavior for this trigger is that it will play the content section indefinitely, or until Display3 recovers and is
-  able
-
-- The behavior for this trigger is that it will play the content section indefinitely, or until Display3 recovers and is
-  able
-  to play
-  its own playback again.
+- The behavior for this trigger is that it will play the content section indefinitely, or until Display3 recovers and
+  is able to play its own playback again.
 
 ```xml
 

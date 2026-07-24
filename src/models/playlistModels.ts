@@ -1,6 +1,8 @@
 import { PriorityObject } from './priorityModels';
 import { SMILMedia, SMILVideo, SosHtmlElement } from './mediaModels';
 import { Synchronization } from './syncModels';
+import { Deferred } from '../components/playlist/tools/Deferred';
+import { PriorityBehaviour } from '../enums/priorityEnums';
 
 export type PrefetchObject = {
 	prefetch: {
@@ -77,20 +79,31 @@ export type CurrentlyPlayingRegion = {
 		endTime: number;
 		playing: boolean;
 		timesPlayed: number;
+		playingCompletionDeferred?: Deferred<void>;
 	};
 	parent: string;
-	behaviour: string;
+	behaviour: PriorityBehaviour;
 	version: number;
-	controlledPlaylist: number | null;
+	/**
+	 * Indexes of entries in the same region this entry paused (higher/peer="pause").
+	 * A list, not a single pointer: while a wallclock campaign window holds the
+	 * region, EVERY lower sibling playlist that attempts to play gets paused —
+	 * releasing only the most recent victim would leave the others frozen at the
+	 * pause gate forever.
+	 */
+	controlledPlaylists: number[];
 	isFirstInPlaylist: SMILMedia;
 };
 
+export type PromiseAwaitingEntry = {
+	promiseFunction?: Promise<void>[];
+	version?: number;
+	highestProcessingPriority?: number;
+	triggerValue?: string;
+};
+
 export type PromiseAwaiting = {
-	[regionName: string]: (SMILMedia | SosHtmlElement) & {
-		promiseFunction?: Promise<void>[];
-		version?: number;                    // Track playlist version
-		highestProcessingPriority?: number;  // Track highest priority currently processing
-	};
+	[regionName: string]: PromiseAwaitingEntry;
 };
 
 export type VideoPreparing = {

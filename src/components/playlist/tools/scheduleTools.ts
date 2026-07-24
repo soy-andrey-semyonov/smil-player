@@ -7,7 +7,7 @@ import { PlaylistElement } from '../../../models/playlistModels';
 import { isConditionalExpExpired } from './conditionalTools';
 import { SMILScheduleEnum } from '../../../enums/scheduleEnums';
 import { parseSmilSchedule } from './wallclockTools';
-import { removeDigits } from './generalTools';
+import { debug, removeDigits } from './generalTools';
 
 /**
  * function to set defaultAwait in case of no active element in wallclock schedule to avoid infinite loop
@@ -80,6 +80,7 @@ export function setDefaultAwait(
 		}
 	}
 
+	debug('[schedule] no playable item in %d elements, setting default await', elementsArray.length);
 	return SMILScheduleEnum.defaultAwait;
 }
 
@@ -89,11 +90,13 @@ export function setDefaultAwait(
  */
 export function setElementDuration(dur: string | undefined): number {
 	if (dur === 'indefinite') {
+		debug('[schedule] parsed duration: indefinite');
 		return SMILScheduleEnum.infiniteDuration;
 	}
 
 	// if duration is undefined
 	if (isNil(dur)) {
+		debug('[schedule] parsed duration: default (dur undefined)');
 		return SMILScheduleEnum.defaultDuration;
 	}
 
@@ -103,10 +106,34 @@ export function setElementDuration(dur: string | undefined): number {
 	dur = dur.replace(/[^0-9.]/g, '');
 	// empty string or NaN
 	if (isNaN(Number(dur)) || dur.length === 0) {
+		debug('[schedule] parsed duration: default (invalid format: %s)', dur);
 		return SMILScheduleEnum.defaultDuration;
 	}
 
 	return parseFloat(dur) * 1000;
+}
+
+/**
+ * checks if all elements in array have wallclock begin and all are permanently expired (neverPlay)
+ * @param elements - array of playlist elements to check
+ */
+export function areAllWallclocksPermanentlyExpired(elements: PlaylistElement[]): boolean {
+	if (!Array.isArray(elements) || elements.length === 0) {
+		return false;
+	}
+
+	for (const elem of elements) {
+		if (!elem.hasOwnProperty('begin') || !elem.begin || elem.begin.indexOf('wallclock') === -1) {
+			return false;
+		}
+		const { timeToEnd } = parseSmilSchedule(elem.begin, elem.end);
+		if (timeToEnd !== SMILScheduleEnum.neverPlay) {
+			return false;
+		}
+	}
+
+	debug('[schedule] all wallclock elements permanently expired: count=%d', elements.length);
+	return true;
 }
 
 export function findDuration(elem: PlaylistElement): string | undefined {

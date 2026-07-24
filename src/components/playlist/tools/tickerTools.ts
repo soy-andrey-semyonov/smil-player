@@ -9,6 +9,44 @@ const DEFAULT_SPACE_BETWEEN_TEXTS = 100;
 const DEFAULT_SPEED_PX_PER_SEC = 100;
 const DEFAULT_WRAPPER_HEIGHT_TO_FONT_SIZE_RATIO = 0.6;
 
+/**
+ * Resolve the ticker font size in px: an explicit numeric `fontSize` wins,
+ * otherwise fall back to a fixed ratio of the wrapper height. A malformed
+ * value (undefined / "auto" / "") parses to NaN and takes the fallback.
+ */
+export function resolveTickerFontSize(rawFontSize: string | undefined, clientHeight: number): number {
+	const fontSizeOrNaN = Number.parseInt(String(rawFontSize), 10);
+	return Number.isInteger(fontSizeOrNaN)
+		? fontSizeOrNaN
+		: Math.round(clientHeight * DEFAULT_WRAPPER_HEIGHT_TO_FONT_SIZE_RATIO);
+}
+
+/**
+ * Gap in px placed after each text. A malformed `indentation` (NaN) would
+ * poison every subsequent text child's starting position, so it falls back to
+ * a sane default.
+ */
+export function resolveSpaceBetweenTexts(rawIndentation: string | undefined): number {
+	const indentation = Number.parseInt(String(rawIndentation), 10);
+	return Number.isInteger(indentation) ? indentation : DEFAULT_SPACE_BETWEEN_TEXTS;
+}
+
+/** Scroll speed in px/sec; a malformed `velocity` (NaN) falls back to a default. */
+export function resolveSpeedPxPerSec(rawVelocity: string | undefined): number {
+	const velocity = Number.parseInt(String(rawVelocity), 10);
+	return Number.isInteger(velocity) ? velocity : DEFAULT_SPEED_PX_PER_SEC;
+}
+
+/** Vertical centering of a text line of `fontSize` within a `clientHeight` wrapper. */
+export function computeTickerTextTop(clientHeight: number, fontSize: number): number {
+	return Math.round(clientHeight / 2 - fontSize / 2);
+}
+
+/** A text child is behind the left edge (and must recycle) once its right edge crosses 0. */
+export function isTextBehindLeftEdge(left: number, width: number): boolean {
+	return left + width < 0;
+}
+
 const getFontFamilyLinkHref = (fontFamily: string) => `https://fonts.googleapis.com/css?family=${fontFamily}`;
 
 function linkFontFamily(fontFamily: string) {
@@ -26,9 +64,9 @@ function linkFontFamily(fontFamily: string) {
 
 export function createTickerElement(ticker: SMILTicker, regionInfo: RegionAttributes, key: string): string {
 	const elementId = `ticker-${ticker.regionInfo.regionName}-${key}`;
-	debug('creating element: %s' + elementId);
+	debug('[ticker] creating element: id=%s', elementId);
 	if (document.getElementById(elementId)) {
-		debug('element already exists: %s' + elementId);
+		debug('[ticker] reusing existing element: id=%s', elementId);
 		return elementId;
 	}
 
@@ -63,8 +101,6 @@ export function createTickerElement(ticker: SMILTicker, regionInfo: RegionAttrib
 			element.style.fontWeight = 'bold';
 		}
 	}
-	const fontSizeOrNaN = Number.parseInt(String(ticker.fontSize), 10);
-
 	element.style.position = 'absolute';
 	element.style.overflow = 'hidden';
 	element.style.whiteSpace = 'nowrap';
@@ -73,9 +109,7 @@ export function createTickerElement(ticker: SMILTicker, regionInfo: RegionAttrib
 	element.style.visibility = 'hidden';
 	document.body.appendChild(element);
 
-	const fontSize = Number.isInteger(fontSizeOrNaN)
-		? `${fontSizeOrNaN}px`
-		: `${Math.round(element.clientHeight * DEFAULT_WRAPPER_HEIGHT_TO_FONT_SIZE_RATIO)}px`;
+	const fontSize = `${resolveTickerFontSize(ticker.fontSize, element.clientHeight)}px`;
 	element.style.lineHeight = fontSize;
 	element.style.fontSize = fontSize;
 
@@ -85,15 +119,19 @@ export function createTickerElement(ticker: SMILTicker, regionInfo: RegionAttrib
 type TextChild = { element: HTMLSpanElement; left: number; width: number };
 
 export function startTickerAnimation(wrapperElement: HTMLElement, ticker: SMILTicker) {
+	// Idempotent start: if this ticker is already animating (e.g. the
+	// playlistProcessor guard at playlistProcessor.ts ~780 misses a state
+	// change and invokes us twice on the same ticker object), detach the
+	// prior setTimeout chain and drop its orphan text <span> children
+	// before building a fresh one. Without this the old chain keeps
+	// scheduling itself forever from its closed-over state and the old
+	// spans linger in the DOM — a slow memory + CPU leak.
+	stopTickerAnimation(ticker);
+
 	const texts = Array.isArray(ticker.text) ? ticker.text : [ticker.text];
-	const fontSizeOrNaN = Number.parseInt(String(ticker.fontSize), 10);
-	const fontSize = Number.isInteger(fontSizeOrNaN)
-		? fontSizeOrNaN
-		: Math.round(wrapperElement.clientHeight * DEFAULT_WRAPPER_HEIGHT_TO_FONT_SIZE_RATIO);
-	const indentation = Number.parseInt(String(ticker.indentation), 10);
-	const spaceBetweenTexts = Number.isInteger(indentation) ? indentation : DEFAULT_SPACE_BETWEEN_TEXTS;
-	const velocity = Number.parseInt(String(ticker.velocity), 10);
-	const speedPxPerSec = Number.isInteger(velocity) ? velocity : DEFAULT_SPEED_PX_PER_SEC;
+	const fontSize = resolveTickerFontSize(ticker.fontSize, wrapperElement.clientHeight);
+	const spaceBetweenTexts = resolveSpaceBetweenTexts(ticker.indentation);
+	const speedPxPerSec = resolveSpeedPxPerSec(ticker.velocity);
 
 	let lastChildRightEdgeLeft = wrapperElement.clientWidth;
 	let textChildren = texts.map((text: string, index: number): TextChild => {
@@ -102,13 +140,17 @@ export function startTickerAnimation(wrapperElement: HTMLElement, ticker: SMILTi
 
 		textChildElement.setAttribute('id', `${ticker.id}_text${index}`);
 		textChildElement.style.position = 'absolute';
-		textChildElement.style.top = `${Math.round(wrapperElement.clientHeight / 2 - fontSize / 2)}px`;
+		textChildElement.style.top = `${computeTickerTextTop(wrapperElement.clientHeight, fontSize)}px`;
 		textChildElement.style.left = `${left}px`;
 		textChildElement.style.transition = 'left 1s linear';
 		textChildElement.innerText = text;
 
 		wrapperElement.appendChild(textChildElement);
-		lastChildRightEdgeLeft += textChildElement.clientWidth + indentation;
+		// spaceBetweenTexts is the sanitized indentation (see resolveSpaceBetweenTexts):
+		// a raw malformed indentation is NaN and `lastChildRightEdgeLeft += NaN`
+		// would poison every subsequent text child's starting position. The per-tick
+		// wrap path below uses spaceBetweenTexts for the same reason.
+		lastChildRightEdgeLeft += textChildElement.clientWidth + spaceBetweenTexts;
 		return { element: textChildElement, left, width: textChildElement.clientWidth };
 	});
 
@@ -116,7 +158,7 @@ export function startTickerAnimation(wrapperElement: HTMLElement, ticker: SMILTi
 		lastChildRightEdgeLeft -= speedPxPerSec;
 		textChildren = textChildren.map((textChild: TextChild) => {
 			let left = textChild.left;
-			const isBehindLeftEdge = textChild.left + textChild.width < 0;
+			const isBehindLeftEdge = isTextBehindLeftEdge(textChild.left, textChild.width);
 
 			if (isBehindLeftEdge) {
 				left = Math.max(lastChildRightEdgeLeft, wrapperElement.clientWidth);

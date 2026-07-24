@@ -12,11 +12,33 @@ import { SMILImage, SMILMediaNoVideo, SMILWidget, SosHtmlElement } from '../../.
 import { PlaylistElement } from '../../../models/playlistModels';
 import { SMILTriggersEnum } from '../../../enums/triggerEnums';
 import { ParsedTriggerCondition, TriggerEndless } from '../../../models/triggerModels';
+import { ListenerScope } from './listenerScope';
 import { SMILFileObject } from '../../../models/filesModels';
 import { copyQueryParameters, createVersionedUrl } from '../../files/tools';
 import { CssElementsPosition } from '../../../models/htmlModels';
 import { BillboardTransition, BillboardTransitionDirection } from '../../../enums/transitionEnums';
 import { setElementDuration } from './scheduleTools';
+
+export interface BillboardColumn {
+	/** strip width in px: regionWidth / columnCount + 2 (the +2 overlaps strips so seams don't show) */
+	width: number;
+	/** horizontal offset magnitude in px: i * (regionWidth / columnCount); background-position uses -offset, margin-left uses +offset */
+	offset: number;
+}
+
+/**
+ * Pure column geometry for the billboard image transition: one descriptor per
+ * vertical strip of the source image. See createHtmlElement for how each maps
+ * onto an <li><div> strip element.
+ */
+export function computeBillboardColumns(regionWidth: number, columnCount: number): BillboardColumn[] {
+	const stripOffset = regionWidth / columnCount;
+	const columns: BillboardColumn[] = [];
+	for (let i = 0; i < columnCount; i++) {
+		columns.push({ width: stripOffset + 2, offset: i * stripOffset });
+	}
+	return columns;
+}
 
 export function createHtmlElement(
 	value: SMILImage | SMILWidget,
@@ -36,7 +58,7 @@ export function createHtmlElement(
 		element.style.padding = '0px';
 		element.style.margin = '0px';
 
-		for (let i = 0; i < columnCount; i++) {
+		for (const column of computeBillboardColumns(regionInfo.width, columnCount)) {
 			const liElement = document.createElement('li');
 			const divElement = document.createElement('div');
 			liElement.style.display = 'inline';
@@ -44,9 +66,9 @@ export function createHtmlElement(
 			liElement.style.paddingLeft = '0px';
 
 			divElement.style.height = `${regionInfo.height}px`;
-			divElement.style.width = `${regionInfo.width / columnCount + 2}px`;
-			divElement.style.setProperty('background-position', `-${i * (regionInfo.width / columnCount)}px 0`);
-			divElement.style.setProperty('margin-left', `${i * (regionInfo.width / columnCount)}px`);
+			divElement.style.width = `${column.width}px`;
+			divElement.style.setProperty('background-position', `-${column.offset}px 0`);
+			divElement.style.setProperty('margin-left', `${column.offset}px`);
 			divElement.style.position = 'absolute';
 			divElement.style.webkitBackfaceVisibility = 'hidden';
 			divElement.style.webkitTransitionProperty = '-webkit-transform';
@@ -131,7 +153,7 @@ export function changeZIndex(
 	if (resultZIndex < currentElementZIndex && !('transitionInfo' in value)) {
 		resultZIndex = 0;
 	}
-	debug('changing zIndex for element: %O : %s', element, resultZIndex);
+	debug('[html] changing zIndex: zIndex=%s', resultZIndex);
 	element?.style.setProperty(HtmlEnum.zIndex, `${currentElementZIndex + resultZIndex}`);
 }
 
@@ -150,9 +172,9 @@ export function createDomElement(
 	isSpecial: boolean = false,
 ): string {
 	const elementId = generateElementId(value.localFilePath, value.regionInfo.regionName, key);
-	debug('creating element: %s' + elementId);
+	debug('[html] creating element: id=%s', elementId);
 	if (document.getElementById(elementId)) {
-		debug('element already exists: %s' + elementId);
+		debug('[html] reusing existing element: id=%s', elementId);
 		return elementId;
 	}
 	const localFilePath = value.localFilePath !== '' ? value.localFilePath : value.src;
@@ -175,14 +197,14 @@ export function extractAttributesByPrefix<T extends ObjectWithStringKeys>(obj: T
 
 export function resetBodyContent() {
 	try {
+		debug('[html] removing stale images');
 		for (let i = document.images.length; i-- > 0; ) {
-			debug('Removing images');
 			if (!isNil(document.images[i])) {
 				document.images[i].parentNode!.removeChild(document.images[i]);
 			}
 		}
 	} catch (err) {
-		debug('Error: %O during removing image: %O', err, document.images[document.images?.length]);
+		debug('[html] error removing image: %O', err);
 	}
 
 	// reset body content
@@ -324,13 +346,14 @@ export function addEventOnTriggerWidget(
 	elem: PlaylistElement,
 	triggerEndless: TriggerEndless,
 	triggerInfo: { condition: ParsedTriggerCondition[]; stringCondition: string; trigger: string },
+	scope: ListenerScope,
 ): void {
 	for (let [key, value] of Object.entries(elem)) {
 		if (removeDigits(key) === 'ref') {
-			setupIframeEventListeners(get(value, 'id'), triggerEndless, triggerInfo);
+			setupIframeEventListeners(get(value, 'id'), triggerEndless, triggerInfo, scope);
 		}
 		if (isObject(value)) {
-			return addEventOnTriggerWidget(value, triggerEndless, triggerInfo);
+			return addEventOnTriggerWidget(value, triggerEndless, triggerInfo, scope);
 		}
 	}
 }
@@ -339,16 +362,16 @@ function setupIframeEventListeners(
 	iframeId: string,
 	triggerEndless: TriggerEndless,
 	triggerInfo: { condition: ParsedTriggerCondition[]; stringCondition: string; trigger: string },
+	scope: ListenerScope,
 ) {
 	const iframe: any = document.getElementById(iframeId);
 	let iDoc = iframe.contentWindow || iframe.contentDocument;
 	if (iDoc.document) {
 		iDoc = iDoc.document;
-		iDoc.body.addEventListener(SMILTriggersEnum.mouseEventType, async () => {
+		scope.add(iDoc.body, SMILTriggersEnum.mouseEventType, async () => {
 			set(triggerEndless, `${triggerInfo.trigger}.latestEventFired`, Date.now());
 		});
-
-		iDoc.body.addEventListener(SMILTriggersEnum.touchEventType, async () => {
+		scope.add(iDoc.body, SMILTriggersEnum.touchEventType, async () => {
 			set(triggerEndless, `${triggerInfo.trigger}.latestEventFired`, Date.now());
 		});
 	}

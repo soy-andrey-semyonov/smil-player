@@ -46,11 +46,9 @@ If you run into issues while developing SMIL Player within Emulator, make sure y
 
 **Videos are not playing in background**
 
-The possibility to play videos in background is currently under review. As of now, you can workaround the missing layering by force all videos to run in background.
-
-- Open the parameters.ts file
-- Change `background: false` to `background: true` https://github.com/signageos/smil-player/blob/master/config/parameters.ts#L6
-- Build and upload this adjusted version
+Set the `videoBackground` configuration parameter to `"true"` in your Applet Timing Configuration — no code changes or
+rebuild required. Videos then play on the background video plane and images/widgets can be layered above them. See
+[Videos](../media/videos.md).
 
 # Known limitations:
-- you cannot layer videos
+- you cannot layer videos on top of each other

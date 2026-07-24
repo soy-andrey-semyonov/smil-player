@@ -3,6 +3,7 @@
 SMIL player has the option to turn on logging of major events which are happening during the playlist lifecycle.
 
 The advantage of this feature is that you can track what is happening with your content, how it is being used, and
+gather proof-of-play data for reporting and billing purposes.
 
 ## Setup
 
@@ -15,18 +16,25 @@ To turn logs on, you have to specify `<meta>` tag with log value in smil header.
 </head>
 ```
 
-### PoP attributes for each element you want reports for in smil playlist
+### PoP attributes
 
-### PoP attributes for each element you want reports for in smil playlist
+All PoP attributes are optional — when proof-of-play logging is enabled, a report is generated for every media
+element. Attributes you set are included in the payload; attributes you omit are left out entirely.
 
-separated by comma which will
+- `popType` — type label included in the report (`"video"`, `"image"`, `"html"`, or `"custom"`).
+- `popCustomId` — custom identifier passed through to the report as `customId`.
+- `popFileName` — file name included in the report.
+- `popTags` — comma-separated list of tags. Sent as an array in the report payload.
+
+The report's `name` field is set by the player to the event type (`media-playback`, `media-download`,
+`playlist-download`) — the `popName` attribute value itself is not carried in the payload, so use `popCustomId` or
+`popFileName` to identify individual media items.
 
 ```xml
 
 <img src="srcToElement"
      dur="15s"
      region="region"
-     popName="video1"
      popType="video"
      popCustomId="customId"
      popFileName="First video"
@@ -40,48 +48,33 @@ separated by comma which will
 
 ## Payload of messages
 
-### Download
+PoP reports contain the fields derived from the `pop*` attributes on each media element. The `tags` array includes
+the `popTags` values followed by the content's final URL and an ISO timestamp.
 
-#### Success
+> **Note:** when a `<meta endpoint>` or the `reportUrl` applet config is set, `type="manual"` reports are POSTed to
+> that custom endpoint instead, with an extended payload that includes HTTP `status`, epoch `time`, and `url` fields —
+> see [Custom Endpoint Reporting](custom-endpoint.md). The examples below show the native signageOS PoP payload used
+> when no custom endpoint is configured.
+
+### Download
 
 ```json
 {
   "name": "media-download",
+  "playbackSuccess": true,
   "customId": "customId",
   "type": "video",
   "tags": [
-    "ckr1u68ig890351znnshenikir",
-    "cm0w686jl009si1l4jcxhhiey",
-    "cm34j6ldy0035ib6ryzevjwsi",
-    "clumdj8st57992mn0dc1umbna",
+    "tag1",
+    "tag2",
+    "https://cdn.example.com/video.mp4",
     "2024-11-19T21:59:28.977Z"
   ],
   "fileName": "video.mp4"
 }
 ```
 
-#### Fail
-
-```json
-{
-  "name": "media-download",
-  "customId": "customId",
-  "type": "video",
-  "tags": [
-    "ckr1u68ig890351znnshenikir",
-    "cm0w686jl009si1l4jcxhhiey",
-    "cm2x29v78001y48p4xfpi97cu",
-    "cm2x1xfz2001t48p43qqoiav0",
-    "2024-11-19T21:48:08.633Z"
-  ],
-  "fileName": "video.mp4",
-  "errorMessage": "File not found"
-}
-```
-
 ### Playback
-
-#### Success
 
 ```json
 {
@@ -90,48 +83,17 @@ separated by comma which will
   "customId": "customId",
   "type": "image",
   "tags": [
-    "ckr1u68ig890351znnshenikir",
-    "cm0w686jl009si1l4jcxhhiey",
-    "cm2x29v78001y48p4xfpi97cu",
-    "cm2x1xfz2001t48p43qqoiav0",
+    "tag1",
+    "tag2",
+    "https://cdn.example.com/image.jpg",
     "2024-11-19T21:48:08.633Z"
   ],
-  "fileName": "video.mp4"
+  "fileName": "banner.jpg"
 }
 ```
 
-#### Fail
+## How to retrieve the reports
 
-```json
-{
-  "name": "media-playback",
-  "playbackSuccess": false,
-  "customId": "customId",
-  "type": "video",
-  "tags": [
-    "ckr1u68ig890351znnshenikir",
-    "cm0w686jl009si1l4jcxhhiey",
-    "cm2x29v78001y48p4xfpi97cu",
-    "cm2x1xfz2001t48p43qqoiav0",
-    "2024-11-19T21:48:08.633Z"
-  ],
-  "fileName": "video.mp4",
-  "errorMessage": "Unsupported video type"
-}
-```
-
-### General error
-
-```json
-{
-  "type": "SMIL.Error",
-  "failedAt": "2024-11-19T21:18:31.996Z",
-  "errorMessage": "No sensors specified for nexmosphere triggers: []"
-}
-```
-
-## How to retrieve logs from api
-
-```xml
-/v1/device/{{deviceUid}}/applet/{{appletUid}}/command
-```
+Native PoP reports are delivered through the signageOS proof-of-play pipeline and retrieved via the signageOS
+reporting APIs / Box. (The `/v1/device/{{deviceUid}}/applet/{{appletUid}}/command` endpoint retrieves
+[standard event reports](event-reporting.md), not PoP reports.)

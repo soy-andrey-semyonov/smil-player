@@ -20,4 +20,6 @@ signageOS SMIL Player supports showing of video inputs like HDMI or DisplayPort 
 |> internal://dp|> DisplayPort|
 |> internal://dvi|> DVI|
 |> internal://pc|> PC or VGA|
->
+
+Note: video inputs are shown live; they are not affected by the `videoBackground` option and are never pre-prepared in
+the background.

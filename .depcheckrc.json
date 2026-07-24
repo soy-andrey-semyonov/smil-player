@@ -5,7 +5,8 @@
   ],
   "parsers": {
     "**/*.ts": "typescript",
-    "**/*.js": "es6"
+    "**/*.js": "es6",
+    "**/*.mjs": "es6"
   },
   "detectors": [
     "importDeclaration",
@@ -25,7 +26,6 @@
     "@signageos/codestyle",
     "mockdate",
     "@signageos/front-applet",
-    "cypress",
     "file-loader",
     "webpack-cli",
     "@babel/preset-env",

@@ -15,6 +15,14 @@ playback. It can be accessed using the following code:
 <ref src="http://server/content.wgt" type="application/widget" dur="indefinite"/>
 ```
 
+The player recognises a widget archive by the **file extension** of the `src` URL — `.wgt`, `.zip`, `.ipk`, and `.apk`
+are treated as widget archives (extracted and served from cache). A `<ref>` whose URL has any other extension is
+rendered as a [live HTML5 website](html5-website.md) instead. The `type` attribute is conventional and not used for
+this decision.
+
+By default widgets are preloaded (the iframe is prepared before the widget's turn). Set `preload="false"` on the
+`<ref>` to load the widget freshly each time it plays — useful for widgets that must re-initialise on every showing.
+
 Here is an example file structure of the widget with nested folders and files:
 
 ```Text

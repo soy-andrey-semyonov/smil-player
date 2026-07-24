@@ -49,4 +49,26 @@ The `<region>` tag defines an area over the entire display zone where individual
 
 In the example above the `<head>` section defines a typical 3-zone digital signage application with a zone for 720x480 video, a slide show zone, and a ticker zone. Overlaying the video zone is an overlay layer which allows the user to place a logo or a dynamic message on-top of the running video.
 
-> Overlay over video is not yet supported. Feature in development.
+> Overlay over video is not supported in the default configuration — videos render on the native video plane above
+> HTML content. To layer images/widgets over video, enable the `videoBackground` applet configuration option (see
+> [Videos](../media/videos.md)).
+
+## Region attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `regionName` | Name the media elements reference in their `region` attribute. `xml:id` works as an alias. |
+| `left`, `top` | Position of the region. Absolute pixels or percentages. |
+| `width`, `height` | Size of the region. Absolute pixels or percentages. |
+| `bottom`, `right` | Alternative anchoring — e.g. `bottom="0"` pins the region to the bottom edge. Resolved against the **display viewport**, not the `root-layout` values. |
+| `z-index` | Stacking order between overlapping regions. |
+| `fit` | Default content fit for media in this region: `fill` (default), `meet`/`meetBest` (contain), `cover`. Unknown values fall back to `fill`. Can be overridden per media element. |
+| `sync` | `sync="true"` marks the region for [multi-device synchronization](../synchronization/playback-synchronization.md). |
+
+Percentage positions and sizes are resolved against the display resolution (for nested trigger sub-regions, against
+the parent region). Note that `backgroundColor` and `mediaAlign` attributes are accepted in the XML but have no
+visual effect on regions — the player renders regions with a transparent background.
+
+Regions may also contain **nested sub-regions**, which are used for [triggered
+content](../dynamic-playback/triggers-interactivity.md) — triggered playlists are dynamically assigned to a free
+sub-region of their parent region.

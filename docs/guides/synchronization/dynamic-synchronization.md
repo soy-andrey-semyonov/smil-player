@@ -13,13 +13,23 @@ Otherwise, playback will be out of sync and will not work as expected.
 
 The system is designed with a hierarchical master-slave model.
 
-**Master Device**: Manages a playlist, synchronizes content, and sends commands to slave devices. Has all the
-information about dynamic synchronized content and is also able to play content specific only to master device.
+**Master Device**: The device whose SMIL playlist contains the `emitDynamic` tag. It decides *when* dynamic content
+starts and stops, and broadcasts those commands to the group. It has all the information about dynamic synchronized
+content and is also able to play content specific only to the master device.
 **Slave Devices**: Play default content and execute commands received from the Master. Does not have any knowledge about
 when to start or when to end dynamic synchronized content.
 
-Communication between the devices is achieved through peer-to-peer (P2P) communication over
-a local network.
+While dynamic content plays, the master re-broadcasts its start command every second as a keepalive. A slave that has
+not heard from the master for ~2.5 seconds cancels the dynamic content locally and returns to its default content —
+so a dead master cannot leave slaves stuck on dynamic content.
+
+Communication uses the same transport as playback synchronization: with `syncServerUrl` configured, devices coordinate
+through the synchronization server (works across networks); without it, they use peer-to-peer communication over the
+local network. See [Playback Synchronization](playback-synchronization.md).
+
+Dynamic synchronization is built on top of the playback-sync machinery, so it requires a working sync setup:
+`syncGroupName` must be configured and the `fullScreenTrigger` sub-region must have `sync="true"` — without these the
+`emitDynamic` tag is ignored.
 
 ### Regions definition
 
@@ -43,7 +53,7 @@ The sub-region also has to be marked as `sync="true"` so the player synchronizes
 
 ### Dynamic content
 
-It's marked in the SMIL file with the `emitDynamic` tag.
+It's marked in the SMIL file with the `emitDynamic` tag (placed only in the **master** device's playlist).
 
 ```xml
 
@@ -53,6 +63,13 @@ It's marked in the SMIL file with the `emitDynamic` tag.
 </seq>
 
 ```
+
+Notes on the attributes:
+
+- `data` — the id of the dynamic playlist to start. Ids must start with the `dynamic` prefix. The value may also be a
+  **comma-separated list** of ids; each device plays whichever id exists in its own SMIL file, which lets one command
+  trigger different (same-duration) playlists on different devices.
+- `syncId` — optional group discriminator; devices sharing the same `syncId` coordinate this dynamic content together.
 
 ### Dynamic content corresponding playlist
 
@@ -78,6 +95,15 @@ device when it finishes playing so slave device would not play the whole content
     <video src="srcToVideo" region="clgmkrvsh4827581xmz267xq5a7"/>
 </seq>
 ```
+
+Two details of this example worth spelling out:
+
+- The media declare the **parent** region (`clgmkrvsh4827581xmz267xq5a7`) as their `region`; at runtime the player
+  reassigns dynamic content into the `fullScreenTrigger` sub-region automatically.
+- The optional `end` attribute names **another dynamic playlist id**: when that other dynamic playlist starts, it
+  cancels this one (cross-cancellation). In the example, starting `dynamic2` stops
+  `dynamic_cm3mna5wb004tawwagb4nk7ya`. Dynamic content also plays at the highest internal priority, temporarily
+  deferring regular content in the region.
 
 ### Applet setup
 
