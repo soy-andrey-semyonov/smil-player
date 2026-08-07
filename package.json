@@ -63,7 +63,7 @@
     "playwright": "1.58.2",
     "@signageos/codestyle": "0.0.21",
     "@signageos/front-applet": "8.6.0",
-    "@signageos/front-display": "v14.39.0",
+    "@signageos/front-display": "v14.40.0",
     "@signageos/webpack-plugin": "1.0.3",
     "@types/chai": "4.1.7",
     "@types/debug": "4.1.7",
