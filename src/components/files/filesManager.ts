@@ -62,6 +62,7 @@ import { FetchStrategy } from './IFilesManager';
 import { getStrategy } from './fetchingStrategies/fetchingStrategies';
 import { SMILEnums } from '../../enums/generalEnums';
 import { ConditionalExprFormat } from '../../enums/conditionalEnums';
+import { getAuthHeaders } from '../../polyfills/getAuthHeaders';
 
 declare global {
 	interface Window {
@@ -1082,7 +1083,7 @@ export class FilesManager implements IFilesManager {
 							try {
 								debug('[files] downloading file: %s', task.updateValue ?? task.file.src);
 								debug('[files] using downloadUrl: %s for file: %s', task.downloadUrl, task.file.src);
-								const authHeaders = window.getAuthHeaders?.(task.downloadUrl);
+								const authHeaders = await getAuthHeaders(task.downloadUrl);
 
 								await this.sos.fileSystem.downloadFile(
 									{
@@ -1181,7 +1182,7 @@ export class FilesManager implements IFilesManager {
 									primaryTask.downloadUrl,
 									primaryTask.file.src,
 								);
-								const authHeaders = window.getAuthHeaders?.(primaryTask.downloadUrl);
+								const authHeaders = await getAuthHeaders(primaryTask.downloadUrl);
 
 								await this.sos.fileSystem.downloadFile(
 									{
@@ -1461,7 +1462,7 @@ export class FilesManager implements IFilesManager {
 										downloadUrl = createDownloadPath(file.src);
 									}
 									debug(`Using downloadUrl: %s for file: %s`, downloadUrl, file.src);
-									const authHeaders = window.getAuthHeaders?.(downloadUrl);
+									const authHeaders = await getAuthHeaders(downloadUrl);
 
 									await this.sos.fileSystem.downloadFile(
 										{
@@ -2122,7 +2123,7 @@ export class FilesManager implements IFilesManager {
 
 		try {
 			const gateUrl = createDownloadPath(media.playCheckUrl);
-			const authHeaders = window.getAuthHeaders?.(gateUrl);
+			const authHeaders = await getAuthHeaders(gateUrl);
 			const response = await this.makeXhrRequest('HEAD', gateUrl, smilObject.refresh.timeOut, authHeaders);
 			const shouldSkip = shouldGateSkipForStatus(response.status, smilObject.skipPlaybackOnHttpStatus);
 			debug(

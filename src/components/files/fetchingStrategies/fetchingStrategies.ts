@@ -4,6 +4,7 @@ import { createDownloadPath, debug } from '../tools';
 import { DEFAULT_LAST_MODIFIED } from '../../../enums/fileEnums';
 import { SMILEnums } from '../../../enums/generalEnums';
 import { UpdateCheckResult } from '../IFilesManager';
+import { getAuthHeaders } from '../../../polyfills/getAuthHeaders';
 
 type XhrRequestFunction = (
 	method: string,
@@ -53,7 +54,7 @@ async function executeHeadRequest(
 			delete media.expr;
 		}
 
-		const authHeaders = window.getAuthHeaders?.(downloadUrl);
+		const authHeaders = await getAuthHeaders(downloadUrl);
 		response = await makeXhrRequest('HEAD', downloadUrl, timeOut, authHeaders);
 	} catch (err) {
 		if (err.message === 'Request timeout') {
@@ -84,7 +85,7 @@ async function executeHeadRequest(
 	const resourceLocation = response?.headers?.get('location') ?? response.url;
 	if (resourceLocation && resourceLocation !== downloadUrl && contentLength === 0) {
 		try {
-			const cdnAuthHeaders = window.getAuthHeaders?.(resourceLocation);
+			const cdnAuthHeaders = await getAuthHeaders(resourceLocation);
 			const cdnResponse = await makeXhrRequest('HEAD', resourceLocation, timeOut, cdnAuthHeaders);
 			contentLength = parseInt(cdnResponse?.headers?.get('content-length') || '0', 10) || 0;
 			debug('[files] %s content-length from CDN HEAD: %d bytes for %s', prefix, contentLength, resourceLocation);
