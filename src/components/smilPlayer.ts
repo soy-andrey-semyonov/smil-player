@@ -33,9 +33,9 @@ export class SmilPlayer implements ISmilPlayer {
 	private dataPrepare: PlaylistDataPrepare;
 	private isPollingForPlaylist: boolean = false;
 
-	constructor(private sos: ISos, smilUrl?: string, private configOverrides?: Record<string, string>) {
+	constructor(private sos: ISos, smilUrl?: string, private configOverrides?: Record<string, string>, files?: FilesManager) {
 		this.smilUrl = smilUrl;
-		this.files = new FilesManager(sos);
+		this.files = files ?? new FilesManager(sos);
 		this.xmlParser = new XmlParser();
 		this.playlist = new SmilPlayerPlaylist(sos, this.files);
 		this.processor = this.playlist.processor;
