@@ -8,13 +8,16 @@
     "README.md",
     "CHANGELOG.md",
     "package.json",
-    "docs"
+    "docs",
+    "es6"
   ],
   "engines": {
     "node": ">=18",
     "npm": ">=8"
   },
   "scripts": {
+    "prepare": "npm run declarations || true",
+    "declarations": "tsc -p tsconfig.declarations.json",
     "test": "nyc --check-coverage mocha  -- \"test/**/*.spec.ts\" --require ts-node/register -P tsconfig.json",
     "test:headless": "playwright test",
     "test:reliable": "playwright test || playwright test --last-failed --workers=1",

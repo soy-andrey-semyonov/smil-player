@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig",
+  "compilerOptions": {
+    "declaration": true,
+    "outDir": "es6",
+    "emitDeclarationOnly": false,
+    "skipDefaultLibCheck": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "strictNullChecks": false,
+    "noImplicitAny": false,
+    "strictFunctionTypes": false,
+    "types": []
+  },
+  "include": [
+    "src/**/*.ts",
+    "config/**/*.ts"
+  ]
+}
