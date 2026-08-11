@@ -9,7 +9,7 @@
     "CHANGELOG.md",
     "package.json",
     "docs",
-    "es6"
+    "lib"
   ],
   "engines": {
     "node": ">=18",
